@@ -4,6 +4,7 @@ using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -333,18 +334,34 @@ public class SharePointClient : IDisposable
         using var httpClient = new HttpClient();
         var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
         var content = new StringContent(json, Encoding.UTF8, "application/json");
-
+        
+        var origColor = Console.ForegroundColor;
+        
         try
         {
             var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
-
+            
+            
             if (!response.IsSuccessStatusCode)
-                Console.WriteLine(response.Content.ToString());
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                var errorString = await response.Content.ReadAsStringAsync();
+                Console.WriteLine(errorString);
+            }
+            else
+            {
+                var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
+
+                Console.ForegroundColor = ConsoleColor.DarkGreen;
+                Console.WriteLine($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
+            }
         }
         catch (Exception ex)
         {
+            Console.ForegroundColor = ConsoleColor.Red; 
             Console.WriteLine(ex.ToString());
         }
+        Console.ForegroundColor = origColor;
     }
 
     private static string ExtractPdfText(byte[] data)
