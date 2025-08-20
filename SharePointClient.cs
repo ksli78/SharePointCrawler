@@ -1,12 +1,17 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Threading.Tasks;
+using DocumentFormat.OpenXml.Packaging;
+using DocumentFormat.OpenXml.Wordprocessing;
+using UglyToad.PdfPig;
 
 namespace SharePointCrawler;
 
@@ -273,6 +278,29 @@ public class SharePointClient : IDisposable
     /// <param name="doc">The document information to send.</param>
     protected virtual async Task SendToExternalApiAsync(DocumentInfo doc)
     {
+        string? textContent = null;
+        var extension = Path.GetExtension(doc.Name).ToLowerInvariant();
+
+        try
+        {
+            switch (extension)
+            {
+                case ".txt":
+                case ".md":
+                    textContent = Encoding.UTF8.GetString(doc.Data);
+                    break;
+                case ".pdf":
+                    textContent = ExtractPdfText(doc.Data);
+                    break;
+                case ".docx":
+                    textContent = ExtractWordText(doc.Data);
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to extract text for {doc.Name}: {ex.Message}");
+        }
 
         var payload = new RagIngestDocument
         {
@@ -298,25 +326,70 @@ public class SharePointClient : IDisposable
             AssociationIds = ExtractKeywords(doc, "Association"),
 
             FileName = doc.Name,
-            ContentBytes = Convert.ToBase64String(doc.Data),
-            
+            TextContent = textContent,
+            ContentBytes = textContent is null ? Convert.ToBase64String(doc.Data) : null,
+
         };
-        var ctn = Convert.FromBase64String(payload.ContentBytes);
 
         using var httpClient = new HttpClient();
         var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
         var content = new StringContent(json, Encoding.UTF8, "application/json");
-
+        
+        var origColor = Console.ForegroundColor;
+        
         try
         {
             var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
-
+            
+            
             if (!response.IsSuccessStatusCode)
-                Console.WriteLine(response.Content.ToString());
-        }catch(Exception ex)
-        { 
-            Console.WriteLine(ex.ToString()); 
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                var errorString = await response.Content.ReadAsStringAsync();
+                Console.WriteLine(errorString);
+            }
+            else
+            {
+                var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
+
+                Console.ForegroundColor = ConsoleColor.DarkGreen;
+                Console.WriteLine($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
+            }
         }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red; 
+            Console.WriteLine(ex.ToString());
+        }
+        Console.ForegroundColor = origColor;
+    }
+
+    private static string ExtractPdfText(byte[] data)
+    {
+        using var ms = new MemoryStream(data);
+        using var document = PdfDocument.Open(ms);
+        var sb = new StringBuilder();
+        foreach (var page in document.GetPages())
+        {
+            sb.AppendLine(page.Text);
+        }
+        return sb.ToString();
+    }
+
+    private static string ExtractWordText(byte[] data)
+    {
+        using var ms = new MemoryStream(data);
+        using var doc = WordprocessingDocument.Open(ms, false);
+        var sb = new StringBuilder();
+        var body = doc.MainDocumentPart?.Document.Body;
+        if (body != null)
+        {
+            foreach (var text in body.Descendants<Text>())
+            {
+                sb.Append(text.Text);
+            }
+        }
+        return sb.ToString();
     }
     private List<string> ExtractKeywords(DocumentInfo doc, string field)
     {
