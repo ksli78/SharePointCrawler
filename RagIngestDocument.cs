@@ -29,14 +29,15 @@ namespace SharePointCrawler
         public List<string>? EnterpriseKeywords { get; set; }
         public List<string>? AssociationIds { get; set; }
 
-        public string? Domain { get; set; } = "HR";
+        public string? Domain { get; set; } = "MS Documents";
         public List<string>? AllowedGroups { get; set; } = new() { "AllEmployees" };
 
         public string? FileName { get; set; }
         public string? ContentBytes { get; set; }
+        public string? TextContent { get; set; }
 
-        public int ChunkSize { get; set; } = 900;
-        public int ChunkOverlap { get; set; } = 120;
+        public int ChunkSize { get; set; } = 1400;
+        public int ChunkOverlap { get; set; } = 300;
         public bool Persist { get; set; } = false;
 
     }

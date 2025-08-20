@@ -298,7 +298,8 @@ public class SharePointClient : IDisposable
             AssociationIds = ExtractKeywords(doc, "Association"),
 
             FileName = doc.Name,
-            ContentBytes = Convert.ToBase64String(doc.Data)
+            ContentBytes = Convert.ToBase64String(doc.Data),
+            
         };
         var ctn = Convert.FromBase64String(payload.ContentBytes);
 
