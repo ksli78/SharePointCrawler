@@ -66,7 +66,10 @@ public class SharePointClient : IDisposable
             handler.UseDefaultCredentials = true;
         }
 
-        _client = new HttpClient(handler);
+        _client = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromMinutes(30)
+        };
         // Request JSON output without additional metadata.  If you prefer a
         // verbose response (wrapped in a top‑level "d" property) you can
         // replace odata=minimalmetadata with odata=verbose.  The crawler
@@ -331,7 +334,10 @@ public class SharePointClient : IDisposable
 
         };
 
-        using var httpClient = new HttpClient();
+        using var httpClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromMinutes(30)
+        };
         var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
         var content = new StringContent(json, Encoding.UTF8, "application/json");
         
