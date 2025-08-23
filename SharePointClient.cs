@@ -183,10 +183,10 @@ public class SharePointClient : IDisposable
                             try
                             {
                                 docInfo = await FetchFileInfoAsync(fileElement).ConfigureAwait(false);
-                                ConsoleWindow.NewDocument(docInfo, start);
+                                ConsoleWindow.StartDocument(docInfo, start);
                                 await SendToExternalApiAsync(docInfo).ConfigureAwait(false);
                                 var elapsed = DateTime.Now - start;
-                                ConsoleWindow.Success($"Completed in {elapsed.TotalSeconds:F1}s");
+                                ConsoleWindow.CompleteDocument(docInfo, elapsed, true);
                             }
                             catch (Exception ex)
                             {
@@ -195,8 +195,9 @@ public class SharePointClient : IDisposable
                                 if (docInfo != null)
                                 {
                                     ErrorLogger.Log(docInfo.Name, docInfo.Url, ex.Message);
+                                    ConsoleWindow.CompleteDocument(docInfo, elapsed, false, ex.Message);
+                                    docInfo = null;
                                 }
-                                docInfo = null;
                             }
                             if (docInfo != null)
                             {
