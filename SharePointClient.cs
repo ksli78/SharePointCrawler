@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -8,9 +9,11 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
+using DocumentFormat.OpenXml.Spreadsheet;
 using UglyToad.PdfPig;
 
 namespace SharePointCrawler;
@@ -34,6 +37,20 @@ public class SharePointClient : IDisposable
     private readonly HttpClient _client;
     private readonly string _siteUrl;
     private string _rootUrl = string.Empty;
+    private static readonly Regex PageNumberRegex = new(@"^(page\s*\d+(\s*of\s*\d+)?)|^\d+$", RegexOptions.IgnoreCase);
+    private static readonly Regex SignatureRegex = new(@"^(signature|signed|approved by|prepared by).*", RegexOptions.IgnoreCase);
+    private static readonly Regex ToCRegex = new(@"table of contents", RegexOptions.IgnoreCase);
+    private static readonly Dictionary<Regex, string> CategoryKeywordMap = new()
+    {
+        [new Regex(@"\b(hr|human resources|employee)\b", RegexOptions.IgnoreCase)] = "HR",
+        [new Regex(@"\b(it|information technology|software|system)\b", RegexOptions.IgnoreCase)] = "IT",
+        [new Regex(@"\b(policy|procedure|guideline)\b", RegexOptions.IgnoreCase)] = "Policy",
+        [new Regex(@"\b(form|template)\b", RegexOptions.IgnoreCase)] = "Form"
+    };
+    private static readonly HashSet<string> StopWords = new(new[]
+    {
+        "the","and","for","with","that","this","from","have","will","their","are","was","were","has","had","but","not","you","your","about","into","can","shall","may","might","should","could","been","being","over","under","after","before","between","within","upon","without","including","include","such","each","any","other","more","most","some","than","too","very","one","two","three"
+    });
     /// <summary>
     /// Constructs a new client for interacting with a SharePoint site.  The
     /// <paramref name="siteUrl"/> parameter should point at the root of the
@@ -298,6 +315,9 @@ public class SharePointClient : IDisposable
                 case ".docx":
                     textContent = ExtractWordText(doc.Data);
                     break;
+                case ".xlsx":
+                    textContent = ExtractExcelText(doc.Data);
+                    break;
             }
         }
         catch (Exception ex)
@@ -305,16 +325,34 @@ public class SharePointClient : IDisposable
             Console.WriteLine($"Failed to extract text for {doc.Name}: {ex.Message}");
         }
 
+        if (textContent != null)
+        {
+            textContent = CleanText(textContent);
+            if (string.IsNullOrWhiteSpace(textContent) || textContent.Length < 500)
+            {
+                Console.WriteLine($"Skipping {doc.Name} due to insufficient content ({textContent?.Length ?? 0} chars).");
+                return;
+            }
+        }
+
+        var originalTitle = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : null;
+        var derivedTitle = DeriveTitle(originalTitle, textContent ?? string.Empty, doc.Name);
+        var categoryMeta = doc.Metadata.TryGetValue("Category", out var categoryValue) ? categoryValue?.ToString() : null;
+        var detectedCategory = DetectCategory(textContent ?? string.Empty) ?? categoryMeta ?? "All Documents";
+        var metaKeywords = ExtractKeywords(doc, "Keywords");
+        var contentKeywords = GenerateKeywords(textContent ?? string.Empty);
+        var allKeywords = metaKeywords.Concat(contentKeywords).Where(k => !string.IsNullOrWhiteSpace(k)).Distinct().ToList();
+
         var payload = new RagIngestDocument
         {
             SpWebUrl = $"{_rootUrl}{doc.Url}",
             SpItemId = doc.Metadata.TryGetValue("UniqueId", out var id) ? id?.ToString() : null,
             ETag = doc.Metadata.TryGetValue("ETag", out var etag) ? etag?.ToString() : null,
 
-            Title = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : null,
+            Title = derivedTitle,
             Org = doc.Metadata.TryGetValue("Org", out var org) ? org?.ToString() : null,
             OrgCode = doc.Metadata.TryGetValue("Org_x0020_Code", out var orgCode) ? orgCode?.ToString() : null,
-            Category = doc.Metadata.TryGetValue("Category", out var category) ? category?.ToString() : "All Documents",
+            Category = detectedCategory,
             DocCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var docCode) ? docCode?.ToString() : null,
             Owner = doc.Metadata.TryGetValue("Owner0", out var owner) ? owner?.ToString() : null,
             Version = doc.Metadata.TryGetValue("Version_", out var version) ? version?.ToString() : null,
@@ -324,12 +362,13 @@ public class SharePointClient : IDisposable
             DocumentReviewDate = doc.Metadata.TryGetValue("aaaa", out var docReview) ? docReview?.ToString() : null,
             ReviewApprovalDate = doc.Metadata.TryGetValue("Review_x0020_Approval_x0020_Date", out var approval) ? approval?.ToString() : null,
 
-            Keywords = ExtractKeywords(doc, "Keywords"),
+            Keywords = allKeywords,
             EnterpriseKeywords = ExtractKeywords(doc, "TaxKeyword"),
             AssociationIds = ExtractKeywords(doc, "Association"),
 
             FileName = doc.Name,
             TextContent = textContent,
+            Summary = textContent != null ? GenerateSummary(textContent) : null,
             ContentBytes = textContent is null ? Convert.ToBase64String(doc.Data) : null,
 
         };
@@ -390,12 +429,120 @@ public class SharePointClient : IDisposable
         var body = doc.MainDocumentPart?.Document.Body;
         if (body != null)
         {
-            foreach (var text in body.Descendants<Text>())
+            foreach (var text in body.Descendants<DocumentFormat.OpenXml.Wordprocessing.Text>())
             {
                 sb.Append(text.Text);
             }
         }
         return sb.ToString();
+    }
+
+    private static string ExtractExcelText(byte[] data)
+    {
+        using var ms = new MemoryStream(data);
+        using var document = SpreadsheetDocument.Open(ms, false);
+        var sb = new StringBuilder();
+        var wbPart = document.WorkbookPart;
+        if (wbPart?.Workbook.Sheets != null)
+        {
+            foreach (Sheet sheet in wbPart.Workbook.Sheets.OfType<Sheet>())
+            {
+                var wsPart = (WorksheetPart)wbPart.GetPartById(sheet.Id!);
+                foreach (var row in wsPart.Worksheet.Descendants<Row>())
+                {
+                    foreach (var cell in row.Descendants<Cell>())
+                    {
+                        var text = GetCellValue(cell, wbPart);
+                        if (!string.IsNullOrWhiteSpace(text))
+                            sb.Append(text).Append(' ');
+                    }
+                    sb.AppendLine();
+                }
+            }
+        }
+        return sb.ToString();
+    }
+
+    private static string GetCellValue(Cell cell, WorkbookPart wbPart)
+    {
+        var value = cell.CellValue?.InnerText ?? string.Empty;
+        if (cell.DataType?.Value == CellValues.SharedString)
+        {             
+            var sstPart = wbPart.SharedStringTablePart;
+            if (sstPart != null)
+            {
+                return sstPart.SharedStringTable.ChildElements[int.Parse(value)].InnerText;
+            }
+        }
+        return value;
+    }
+
+    private static string CleanText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+
+        var lines = text.Split('\n');
+        var lineCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in lines)
+        {
+            var trimmed = line.Trim();
+            if (trimmed.Length == 0) continue;
+            lineCounts[trimmed] = lineCounts.TryGetValue(trimmed, out var c) ? c + 1 : 1;
+        }
+        var totalLines = lines.Length;
+        var sb = new StringBuilder();
+        var inToc = false;
+        foreach (var line in lines)
+        {
+            var trimmed = line.Trim();
+            if (trimmed.Length == 0) continue;
+            if (PageNumberRegex.IsMatch(trimmed) || SignatureRegex.IsMatch(trimmed)) continue;
+            if (lineCounts.TryGetValue(trimmed, out var count) && count > totalLines * 0.5) continue; // header/footer
+            if (!inToc && ToCRegex.IsMatch(trimmed)) { inToc = true; continue; }
+            if (inToc)
+            {
+                if (string.IsNullOrWhiteSpace(trimmed)) inToc = false;
+                continue;
+            }
+            sb.AppendLine(trimmed);
+        }
+
+        var cleaned = sb.ToString();
+        cleaned = Regex.Replace(cleaned, @"\s+", " ");
+        return cleaned.Trim();
+    }
+
+    private static string DeriveTitle(string? original, string text, string fileName)
+    {
+        var firstLine = text.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
+        if (string.IsNullOrWhiteSpace(original) || original.Equals(Path.GetFileNameWithoutExtension(fileName), StringComparison.OrdinalIgnoreCase))
+        {
+            return firstLine ?? original ?? fileName;
+        }
+        return original;
+    }
+
+    private static string? DetectCategory(string text)
+    {
+        foreach (var kvp in CategoryKeywordMap)
+        {
+            if (kvp.Key.IsMatch(text)) return kvp.Value;
+        }
+        return null;
+    }
+
+    private static List<string> GenerateKeywords(string text, int max = 10)
+    {
+        var tokens = Regex.Matches(text.ToLowerInvariant(), @"\b[a-z]{3,}\b").Select(m => m.Value)
+            .Where(t => !StopWords.Contains(t));
+        var freq = tokens.GroupBy(t => t).ToDictionary(g => g.Key, g => g.Count());
+        return freq.OrderByDescending(kv => kv.Value).Take(max).Select(kv => kv.Key).ToList();
+    }
+
+    private static string GenerateSummary(string text, int maxSentences = 3)
+    {
+        var sentences = Regex.Split(text, @"(?<=[\.\!\?])\s+").Where(s => !string.IsNullOrWhiteSpace(s)).ToArray();
+        return string.Join(" ", sentences.Take(maxSentences));
     }
     private List<string> ExtractKeywords(DocumentInfo doc, string field)
     {
@@ -403,6 +550,14 @@ public class SharePointClient : IDisposable
         if (raw is string s && s.Contains(";")) return s.Split(';').Select(x => x.Trim()).ToList();
         if (raw is IEnumerable<object> list) return list.Select(x => x?.ToString()).Where(x => !string.IsNullOrWhiteSpace(x)).ToList()!;
         return new() { raw?.ToString()! };
+    }
+
+    private class IngestResponse
+    {
+        public bool Success { get; set; }
+        public string? DocID { get; set; }
+        public int Chunks { get; set; }
+        public string? IngestType { get; set; }
     }
 
     /// <summary>
