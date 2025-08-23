@@ -12,8 +12,9 @@ namespace SharePointCrawler;
 /// </summary>
 public static class ConsoleWindow
 {
-    private const int Width = 100;
+    private const int DesiredWidth = 150;
     private const int PaneHeight = 10;
+    private static int Width => Math.Min(Console.BufferWidth, DesiredWidth);
 
     private static readonly List<(string Text, ConsoleColor Color)> _currentLines = new();
     private static readonly List<(string Text, ConsoleColor Color)> _previousLines = new();
@@ -26,6 +27,21 @@ public static class ConsoleWindow
     /// </summary>
     public static void Initialize()
     {
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                if (Console.BufferWidth < DesiredWidth)
+                    Console.BufferWidth = DesiredWidth;
+                if (Console.WindowWidth < DesiredWidth)
+                    Console.WindowWidth = DesiredWidth;
+            }
+        }
+        catch
+        {
+            // Some environments don't allow resizing; ignore any errors.
+        }
+
         Console.Clear();
         DrawPaneBorder(0);
         DrawPaneBorder(PaneHeight);
