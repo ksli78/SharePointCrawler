@@ -15,6 +15,7 @@ using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
 using DocumentFormat.OpenXml.Spreadsheet;
 using UglyToad.PdfPig;
+using System.Text.Json.Serialization;
 
 namespace SharePointCrawler;
 
@@ -399,6 +400,7 @@ public class SharePointClient : IDisposable
 
                 Console.ForegroundColor = ConsoleColor.DarkGreen;
                 Console.WriteLine($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
+                Console.WriteLine($"Summary:{resp.Summary}");
             }
         }
         catch (Exception ex)
@@ -554,10 +556,16 @@ public class SharePointClient : IDisposable
 
     private class IngestResponse
     {
+        [JsonPropertyName("ok")]
         public bool Success { get; set; }
+        [JsonPropertyName("doc_id")]
         public string? DocID { get; set; }
+        [JsonPropertyName("chunks")]
         public int Chunks { get; set; }
+        [JsonPropertyName("used")]
         public string? IngestType { get; set; }
+        [JsonPropertyName("summary")]
+        public string? Summary { get; set; }
     }
 
     /// <summary>
