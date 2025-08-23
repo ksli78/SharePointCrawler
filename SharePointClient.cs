@@ -178,9 +178,30 @@ public class SharePointClient : IDisposable
                     {
                         foreach (var fileElement in fileArray.EnumerateArray())
                         {
-                            var docInfo = await FetchFileInfoAsync(fileElement).ConfigureAwait(false);
-                            await SendToExternalApiAsync(docInfo).ConfigureAwait(false);
-                            yield return docInfo;
+                            DocumentInfo? docInfo = null;
+                            var start = DateTime.Now;
+                            try
+                            {
+                                docInfo = await FetchFileInfoAsync(fileElement).ConfigureAwait(false);
+                                ConsoleWindow.NewDocument(docInfo, start);
+                                await SendToExternalApiAsync(docInfo).ConfigureAwait(false);
+                                var elapsed = DateTime.Now - start;
+                                ConsoleWindow.Success($"Completed in {elapsed.TotalSeconds:F1}s");
+                            }
+                            catch (Exception ex)
+                            {
+                                var elapsed = DateTime.Now - start;
+                                ConsoleWindow.Error($"Error: {ex.Message} (elapsed {elapsed.TotalSeconds:F1}s)");
+                                if (docInfo != null)
+                                {
+                                    ErrorLogger.Log(docInfo.Name, docInfo.Url, ex.Message);
+                                }
+                                docInfo = null;
+                            }
+                            if (docInfo != null)
+                            {
+                                yield return docInfo;
+                            }
                         }
                     }
                 }
@@ -279,9 +300,9 @@ public class SharePointClient : IDisposable
             }
             else
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine(fileResponse.Content.ToString());
-                Console.ForegroundColor = ConsoleColor.White;
+                var msg = await fileResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
+                ConsoleWindow.Error(msg);
+                ErrorLogger.Log(doc.Name, doc.Url, msg);
             }
         }
 
@@ -323,7 +344,9 @@ public class SharePointClient : IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Failed to extract text for {doc.Name}: {ex.Message}");
+            var msg = $"Failed to extract text for {doc.Name}: {ex.Message}";
+            ConsoleWindow.Error(msg);
+            ErrorLogger.Log(doc.Name, doc.Url, msg);
         }
 
         if (textContent != null)
@@ -331,7 +354,7 @@ public class SharePointClient : IDisposable
             textContent = CleanText(textContent);
             if (string.IsNullOrWhiteSpace(textContent) || textContent.Length < 500)
             {
-                Console.WriteLine($"Skipping {doc.Name} due to insufficient content ({textContent?.Length ?? 0} chars).");
+                ConsoleWindow.Info($"Skipping {doc.Name} due to insufficient content ({textContent?.Length ?? 0} chars).");
                 return;
             }
         }
@@ -381,34 +404,32 @@ public class SharePointClient : IDisposable
         var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
         var content = new StringContent(json, Encoding.UTF8, "application/json");
         
-        var origColor = Console.ForegroundColor;
-        
         try
         {
             var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
-            
-            
+
             if (!response.IsSuccessStatusCode)
             {
-                Console.ForegroundColor = ConsoleColor.Red;
                 var errorString = await response.Content.ReadAsStringAsync();
-                Console.WriteLine(errorString);
+                ConsoleWindow.Error(errorString);
+                ErrorLogger.Log(doc.Name, doc.Url, errorString);
             }
             else
             {
                 var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
-
-                Console.ForegroundColor = ConsoleColor.DarkGreen;
-                Console.WriteLine($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
-                Console.WriteLine($"Summary:{resp.Summary}");
+                if (resp != null)
+                {
+                    ConsoleWindow.Success($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
+                    if (!string.IsNullOrWhiteSpace(resp.Summary))
+                        ConsoleWindow.Info($"Summary:{resp.Summary}");
+                }
             }
         }
         catch (Exception ex)
         {
-            Console.ForegroundColor = ConsoleColor.Red; 
-            Console.WriteLine(ex.ToString());
+            ConsoleWindow.Error(ex.ToString());
+            ErrorLogger.Log(doc.Name, doc.Url, ex.ToString());
         }
-        Console.ForegroundColor = origColor;
     }
 
     private static string ExtractPdfText(byte[] data)

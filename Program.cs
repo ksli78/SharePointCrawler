@@ -40,10 +40,12 @@ public static class Program
         // otherwise we assume a local machine account.
         NetworkCredential credential = new(username, password, domain);
 
+        ConsoleWindow.Initialize();
+
         using var client = new SharePointClient(siteUrl, credential);
         await foreach (var doc in client.GetDocumentsAsync(libraryRelativeUrl))
         {
-            Console.WriteLine($"Fetched {doc.Name} from {doc.Url} ({doc.Data.Length} bytes)");
+            // Processing feedback is handled by SharePointClient via ConsoleWindow.
         }
     }
 }
