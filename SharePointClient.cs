@@ -38,6 +38,10 @@ public class SharePointClient : IDisposable
     private readonly HttpClient _client;
     private readonly string _siteUrl;
     private string _rootUrl = string.Empty;
+    public int DocsScanned { get; private set; }
+    public int DocsSelected { get; private set; }
+    public int ChunksProduced { get; private set; }
+    public string? Collection { get; }
     private static readonly Regex PageNumberRegex = new(@"^(page\s*\d+(\s*of\s*\d+)?)|^\d+$", RegexOptions.IgnoreCase);
     private static readonly Regex SignatureRegex = new(@"^(signature|signed|approved by|prepared by).*", RegexOptions.IgnoreCase);
     private static readonly Regex ToCRegex = new(@"table of contents", RegexOptions.IgnoreCase);
@@ -99,6 +103,20 @@ public class SharePointClient : IDisposable
 
         _client.DefaultRequestHeaders.Add("X-FORMS_BASED_AUTH_ACCEPTED", "f");
     }
+
+    public SharePointClient(string siteUrl, string collection, NetworkCredential? credential, string? libraryRelativeUrl = null)
+        : this(siteUrl, credential)
+    {
+        Collection = collection;
+        _defaultLibrary = libraryRelativeUrl;
+    }
+
+    public SharePointClient(string siteUrl, string libraryRelativeUrl, string collection, NetworkCredential? credential)
+        : this(siteUrl, collection, credential, libraryRelativeUrl)
+    {
+    }
+
+    private readonly string? _defaultLibrary;
 
     /// <summary>
     /// Recursively enumerates all files within a document library.  The
@@ -178,15 +196,17 @@ public class SharePointClient : IDisposable
                     {
                         foreach (var fileElement in fileArray.EnumerateArray())
                         {
+                            DocsScanned++;
                             DocumentInfo? docInfo = null;
                             var start = DateTime.Now;
                             try
                             {
                                 docInfo = await FetchFileInfoAsync(fileElement).ConfigureAwait(false);
                                 ConsoleWindow.StartDocument(docInfo, start);
-                                await SendToExternalApiAsync(docInfo).ConfigureAwait(false);
+                                var processed = await SendToExternalApiAsync(docInfo).ConfigureAwait(false);
                                 var elapsed = DateTime.Now - start;
                                 ConsoleWindow.CompleteDocument(docInfo, elapsed, true);
+                                if (processed) DocsSelected++;
                             }
                             catch (Exception ex)
                             {
@@ -319,7 +339,7 @@ public class SharePointClient : IDisposable
     /// made asynchronous.
     /// </summary>
     /// <param name="doc">The document information to send.</param>
-    protected virtual async Task SendToExternalApiAsync(DocumentInfo doc)
+    protected virtual async Task<bool> SendToExternalApiAsync(DocumentInfo doc)
     {
         string? textContent = null;
         var extension = Path.GetExtension(doc.Name).ToLowerInvariant();
@@ -356,7 +376,7 @@ public class SharePointClient : IDisposable
             if (string.IsNullOrWhiteSpace(textContent) || textContent.Length < 500)
             {
                 ConsoleWindow.Info($"Skipping {doc.Name} due to insufficient content ({textContent?.Length ?? 0} chars).");
-                return;
+                return false;
             }
         }
 
@@ -398,6 +418,8 @@ public class SharePointClient : IDisposable
         {
             Timeout = TimeSpan.FromMinutes(30)
         };
+        var baseUrl = "http://adam.amentumspacemissions.com:8000/ingest_document";
+        var ingestUrl = string.IsNullOrWhiteSpace(Collection) ? baseUrl : $"{baseUrl}?collection={Uri.EscapeDataString(Collection)}";
         var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
 
         try
@@ -416,7 +438,7 @@ public class SharePointClient : IDisposable
 
                     var json = JsonSerializer.Serialize(payload, jsonOptions);
                     var content = new StringContent(json, Encoding.UTF8, "application/json");
-                    var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
+                    var response = await httpClient.PostAsync(ingestUrl, content);
 
                     if (!response.IsSuccessStatusCode)
                     {
@@ -425,8 +447,9 @@ public class SharePointClient : IDisposable
                         ErrorLogger.Log(doc.Name, doc.Url, errorString);
                     }
                 }
-
+                ChunksProduced += chunks.Count;
                 ConsoleWindow.Success($"Ingested {chunks.Count} chunks for {doc.Name} via /ingest_document");
+                return true;
             }
             else
             {
@@ -436,24 +459,24 @@ public class SharePointClient : IDisposable
 
                 var json = JsonSerializer.Serialize(payload, jsonOptions);
                 var content = new StringContent(json, Encoding.UTF8, "application/json");
-                var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
+                var response = await httpClient.PostAsync(ingestUrl, content);
 
                 if (!response.IsSuccessStatusCode)
                 {
                     var errorString = await response.Content.ReadAsStringAsync();
                     ConsoleWindow.Error(errorString);
                     ErrorLogger.Log(doc.Name, doc.Url, errorString);
+                    return false;
                 }
-                else
+                var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
+                if (resp != null)
                 {
-                    var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
-                    if (resp != null)
-                    {
-                        ConsoleWindow.Success($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
-                        if (!string.IsNullOrWhiteSpace(resp.Summary))
-                            ConsoleWindow.Info($"Summary:{resp.Summary}");
-                    }
+                    ChunksProduced += resp.Chunks;
+                    ConsoleWindow.Success($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
+                    if (!string.IsNullOrWhiteSpace(resp.Summary))
+                        ConsoleWindow.Info($"Summary:{resp.Summary}");
                 }
+                return true;
             }
         }
         catch (Exception ex)
@@ -461,6 +484,7 @@ public class SharePointClient : IDisposable
             ConsoleWindow.Error(ex.ToString());
             ErrorLogger.Log(doc.Name, doc.Url, ex.ToString());
         }
+        return false;
     }
 
     private static string ExtractPdfText(byte[] data)
