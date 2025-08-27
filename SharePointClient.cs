@@ -52,6 +52,16 @@ public class SharePointClient : IDisposable
     {
         "the","and","for","with","that","this","from","have","will","their","are","was","were","has","had","but","not","you","your","about","into","can","shall","may","might","should","could","been","being","over","under","after","before","between","within","upon","without","including","include","such","each","any","other","more","most","some","than","too","very","one","two","three"
     });
+
+    private readonly CrawlerOptions _options;
+    private readonly Func<DocumentInfo, bool>? _docFilter;
+    private int _docsScanned;
+    private int _docsSelected;
+    private int _chunksProduced;
+    public int DocsScanned => _docsScanned;
+    public int DocsSelected => _docsSelected;
+    public int ChunksProduced => _chunksProduced;
+    public string Collection => _options.Collection;
     /// <summary>
     /// Constructs a new client for interacting with a SharePoint site.  The
     /// <paramref name="siteUrl"/> parameter should point at the root of the
@@ -63,7 +73,7 @@ public class SharePointClient : IDisposable
     /// </summary>
     /// <param name="siteUrl">The base URL of the SharePoint site.</param>
     /// <param name="credential">Windows credentials for authentication.</param>
-    public SharePointClient(string siteUrl, NetworkCredential? credential)
+    public SharePointClient(string siteUrl, NetworkCredential? credential, CrawlerOptions options, Func<DocumentInfo, bool>? filter = null)
     {
         if (string.IsNullOrWhiteSpace(siteUrl))
             throw new ArgumentException("Site URL must be provided", nameof(siteUrl));
@@ -98,6 +108,9 @@ public class SharePointClient : IDisposable
         _client.DefaultRequestHeaders.Add("Prefer", "odata=minimalmetadata");
 
         _client.DefaultRequestHeaders.Add("X-FORMS_BASED_AUTH_ACCEPTED", "f");
+
+        _options = options;
+        _docFilter = filter;
     }
 
     /// <summary>
@@ -183,10 +196,15 @@ public class SharePointClient : IDisposable
                             try
                             {
                                 docInfo = await FetchFileInfoAsync(fileElement).ConfigureAwait(false);
-                                ConsoleWindow.StartDocument(docInfo, start);
-                                await SendToExternalApiAsync(docInfo).ConfigureAwait(false);
-                                var elapsed = DateTime.Now - start;
-                                ConsoleWindow.CompleteDocument(docInfo, elapsed, true);
+                                _docsScanned++;
+                                if (_docFilter == null || _docFilter(docInfo))
+                                {
+                                    _docsSelected++;
+                                    ConsoleWindow.StartDocument(docInfo, start);
+                                    await SendToExternalApiAsync(docInfo).ConfigureAwait(false);
+                                    var elapsed = DateTime.Now - start;
+                                    ConsoleWindow.CompleteDocument(docInfo, elapsed, true);
+                                }
                             }
                             catch (Exception ex)
                             {
@@ -202,6 +220,8 @@ public class SharePointClient : IDisposable
                             if (docInfo != null)
                             {
                                 yield return docInfo;
+                                if (_options.MaxDocs.HasValue && _docsSelected >= _options.MaxDocs.Value)
+                                    yield break;
                             }
                         }
                     }
@@ -321,57 +341,88 @@ public class SharePointClient : IDisposable
     /// <param name="doc">The document information to send.</param>
     protected virtual async Task SendToExternalApiAsync(DocumentInfo doc)
     {
-        string? textContent = null;
         var extension = Path.GetExtension(doc.Name).ToLowerInvariant();
+        ExtractedText extracted = extension switch
+        {
+            ".pdf" => ExtractPdfText(doc.Data),
+            ".docx" => ExtractWordText(doc.Data),
+            ".xlsx" => ExtractExcelText(doc.Data),
+            ".txt" or ".md" => new ExtractedText { Text = Encoding.UTF8.GetString(doc.Data) },
+            _ => new ExtractedText { Text = string.Empty }
+        };
 
-        try
+        if (string.IsNullOrWhiteSpace(extracted.Text) || Tokenizer.CountTokens(extracted.Text) < 20)
         {
-            switch (extension)
-            {
-                case ".txt":
-                case ".md":
-                    textContent = Encoding.UTF8.GetString(doc.Data);
-                    break;
-                case ".pdf":
-                    textContent = ExtractPdfText(doc.Data);
-                    break;
-                case ".docx":
-                    textContent = ExtractWordText(doc.Data);
-                    break;
-                case ".xlsx":
-                    textContent = ExtractExcelText(doc.Data);
-                    break;
-            }
-        }
-        catch (Exception ex)
-        {
-            var msg = $"Failed to extract text for {doc.Name}: {ex.Message}";
-            ConsoleWindow.Error(msg);
-            ErrorLogger.Log(doc.Name, doc.Url, msg);
-        }
-
-        if (textContent != null)
-        {
-            textContent = CleanText(textContent);
-            if (string.IsNullOrWhiteSpace(textContent) || textContent.Length < 500)
-            {
-                ConsoleWindow.Info($"Skipping {doc.Name} due to insufficient content ({textContent?.Length ?? 0} chars).");
-                return;
-            }
+            ConsoleWindow.Info($"Skipping {doc.Name} due to insufficient content");
+            return;
         }
 
         var originalTitle = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : null;
-        var derivedTitle = DeriveTitle(originalTitle, textContent ?? string.Empty, doc.Name);
+        var derivedTitle = DeriveTitle(originalTitle, extracted.Text, doc.Name);
+
+        // Build chunks for embedding
+        var chunks = new List<ChunkData>();
+        foreach (var slice in Tokenizer.SmartSplitByTokens(extracted.Text, _options.ChunkSizeTokens, _options.ChunkOverlapTokens))
+        {
+            var breadcrumbs = BuildBreadcrumbs(derivedTitle, extracted.Headings, slice.Start);
+            var section = GetSectionHeading(extracted.Headings, slice.Start);
+            var page = DeterminePage(extracted.PageStarts, slice.Start);
+            var header = $"DOC: {derivedTitle} | PATH: {breadcrumbs}";
+            if (page.HasValue) header += $" | PAGE: {page}";
+            var chunkText = $"{header}\n\n{slice.Text}";
+
+            var metadata = new Dictionary<string, object?>
+            {
+                ["doc_id"] = doc.Metadata.TryGetValue("UniqueId", out var id) ? id?.ToString() : null,
+                ["doc_title"] = derivedTitle,
+                ["sp_url"] = $"{_rootUrl}{doc.Url}",
+                ["last_modified"] = doc.Metadata.TryGetValue("TimeLastModified", out var lm) ? lm?.ToString() : null,
+                ["page_num"] = page,
+                ["section_heading"] = section,
+                ["breadcrumbs"] = breadcrumbs,
+                ["permissions_tag"] = doc.Metadata.TryGetValue("PermissionsTag", out var perm) ? perm?.ToString() : null,
+                ["mime_type"] = GetMimeType(extension),
+                ["library"] = ExtractLibrary(doc.Url),
+                ["site"] = ExtractSite(doc.Url)
+            };
+            chunks.Add(new ChunkData { Text = chunkText, Metadata = metadata });
+        }
+
+        _chunksProduced += chunks.Count;
+
+        using (var httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(30) })
+        {
+            foreach (var batch in chunks.Chunk(64))
+            {
+                var payloadEmbed = new
+                {
+                    collection = _options.Collection,
+                    chunks = batch.Select(b => new { text = b.Text, metadata = b.Metadata })
+                };
+                var jsonEmbed = JsonSerializer.Serialize(payloadEmbed);
+                var contentEmbed = new StringContent(jsonEmbed, Encoding.UTF8, "application/json");
+                var resp = await httpClient.PostAsync("http://adam.amentumspacemissions.com:8000/embed", contentEmbed);
+                if (!resp.IsSuccessStatusCode)
+                {
+                    var err = await resp.Content.ReadAsStringAsync();
+                    ConsoleWindow.Error(err);
+                    ErrorLogger.Log(doc.Name, doc.Url, err);
+                }
+            }
+        }
+
+        // Original ingestion call preserved
+        var textContent = CleanText(extracted.Text);
         var categoryMeta = doc.Metadata.TryGetValue("Category", out var categoryValue) ? categoryValue?.ToString() : null;
-        var detectedCategory = DetectCategory(textContent ?? string.Empty) ?? categoryMeta ?? "All Documents";
+        var detectedCategory = DetectCategory(textContent) ?? categoryMeta ?? "All Documents";
         var metaKeywords = ExtractKeywords(doc, "Keywords");
-        var contentKeywords = GenerateKeywords(textContent ?? string.Empty);
+        var contentKeywords = GenerateKeywords(textContent);
         var allKeywords = metaKeywords.Concat(contentKeywords).Where(k => !string.IsNullOrWhiteSpace(k)).Distinct().ToList();
 
         var payload = new RagIngestDocument
         {
             SpWebUrl = $"{_rootUrl}{doc.Url}",
-            SpItemId = doc.Metadata.TryGetValue("UniqueId", out var id) ? id?.ToString() : null,
+            SpItemId = doc.Metadata.TryGetValue("UniqueId", out var id2) ? id2?.ToString() : null,
             ETag = doc.Metadata.TryGetValue("ETag", out var etag) ? etag?.ToString() : null,
 
             Title = derivedTitle,
@@ -393,22 +444,18 @@ public class SharePointClient : IDisposable
 
             FileName = doc.Name,
             TextContent = textContent,
-            Summary = textContent != null ? GenerateSummary(textContent) : null,
-            ContentBytes = textContent is null ? Convert.ToBase64String(doc.Data) : null,
+            Summary = GenerateSummary(textContent),
+            ContentBytes = null,
 
         };
 
-        using var httpClient = new HttpClient
-        {
-            Timeout = TimeSpan.FromMinutes(30)
-        };
+        using var httpClient2 = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
         var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
         var content = new StringContent(json, Encoding.UTF8, "application/json");
-        
+
         try
         {
-            var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
-
+            var response = await httpClient2.PostAsync("http://adam.amentumspacemissions.com:8000/ingest_document", content);
             if (!response.IsSuccessStatusCode)
             {
                 var errorString = await response.Content.ReadAsStringAsync();
@@ -433,65 +480,111 @@ public class SharePointClient : IDisposable
         }
     }
 
-    private static string ExtractPdfText(byte[] data)
+    private class ExtractedText
+    {
+        public string Text { get; set; } = string.Empty;
+        public List<HeadingSpan> Headings { get; set; } = new();
+        public List<int> PageStarts { get; set; } = new();
+    }
+
+    private class HeadingSpan
+    {
+        public int Level { get; set; }
+        public string Text { get; set; } = string.Empty;
+        public int Start { get; set; }
+    }
+
+    private class ChunkData
+    {
+        public string Text { get; set; } = string.Empty;
+        public Dictionary<string, object?> Metadata { get; set; } = new();
+    }
+
+    private static ExtractedText ExtractPdfText(byte[] data)
     {
         using var ms = new MemoryStream(data);
         using var document = PdfDocument.Open(ms);
         var sb = new StringBuilder();
+        var pageStarts = new List<int>();
         foreach (var page in document.GetPages())
         {
+            pageStarts.Add(sb.Length);
             sb.AppendLine(page.Text);
         }
-        return sb.ToString();
+        return new ExtractedText { Text = sb.ToString(), PageStarts = pageStarts };
     }
 
-    private static string ExtractWordText(byte[] data)
+    private static ExtractedText ExtractWordText(byte[] data)
     {
         using var ms = new MemoryStream(data);
         using var doc = WordprocessingDocument.Open(ms, false);
         var sb = new StringBuilder();
+        var headings = new List<HeadingSpan>();
         var body = doc.MainDocumentPart?.Document.Body;
         if (body != null)
         {
-            foreach (var text in body.Descendants<DocumentFormat.OpenXml.Wordprocessing.Text>())
+            foreach (var element in body.Elements())
             {
-                sb.Append(text.Text);
+                if (element is Paragraph p)
+                {
+                    var text = p.InnerText.Trim();
+                    if (string.IsNullOrWhiteSpace(text)) continue;
+                    var start = sb.Length;
+                    if (p.ParagraphProperties?.NumberingProperties != null)
+                        sb.Append("• ");
+                    sb.AppendLine(text);
+                    var styleId = p.ParagraphProperties?.ParagraphStyleId?.Val?.Value;
+                    if (!string.IsNullOrEmpty(styleId) && styleId.StartsWith("Heading", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (int.TryParse(styleId.Substring(7), out var lvl))
+                            headings.Add(new HeadingSpan { Level = lvl, Text = text, Start = start });
+                    }
+                }
+                else if (element is DocumentFormat.OpenXml.Wordprocessing.Table table)
+                {
+                    foreach (var row in table.Elements<DocumentFormat.OpenXml.Wordprocessing.TableRow>())
+                    {
+                        var cells = row.Elements<DocumentFormat.OpenXml.Wordprocessing.TableCell>().Select(c => c.InnerText.Trim()).ToArray();
+                        if (cells.Length > 0)
+                            sb.Append("| ").Append(string.Join(" | ", cells)).Append(" |").AppendLine();
+                    }
+                }
             }
         }
-        return sb.ToString();
+        return new ExtractedText { Text = sb.ToString(), Headings = headings };
     }
 
-    private static string ExtractExcelText(byte[] data)
+    private static ExtractedText ExtractExcelText(byte[] data)
     {
         using var ms = new MemoryStream(data);
         using var document = SpreadsheetDocument.Open(ms, false);
         var sb = new StringBuilder();
+        var headings = new List<HeadingSpan>();
         var wbPart = document.WorkbookPart;
         if (wbPart?.Workbook.Sheets != null)
         {
             foreach (Sheet sheet in wbPart.Workbook.Sheets.OfType<Sheet>())
             {
+                var start = sb.Length;
+                sb.AppendLine(sheet.Name!);
+                headings.Add(new HeadingSpan { Level = 1, Text = sheet.Name!, Start = start });
                 var wsPart = (WorksheetPart)wbPart.GetPartById(sheet.Id!);
                 foreach (var row in wsPart.Worksheet.Descendants<Row>())
                 {
-                    foreach (var cell in row.Descendants<Cell>())
-                    {
-                        var text = GetCellValue(cell, wbPart);
-                        if (!string.IsNullOrWhiteSpace(text))
-                            sb.Append(text).Append(' ');
-                    }
-                    sb.AppendLine();
+                    var cells = row.Descendants<Cell>().Select(c => GetCellValue(c, wbPart)).ToArray();
+                    if (cells.Length > 0)
+                        sb.Append("| ").Append(string.Join(" | ", cells)).Append(" |").AppendLine();
                 }
             }
         }
-        return sb.ToString();
+        return new ExtractedText { Text = sb.ToString(), Headings = headings };
     }
 
     private static string GetCellValue(Cell cell, WorkbookPart wbPart)
     {
         var value = cell.CellValue?.InnerText ?? string.Empty;
         if (cell.DataType?.Value == CellValues.SharedString)
-        {             
+        {
             var sstPart = wbPart.SharedStringTablePart;
             if (sstPart != null)
             {
@@ -499,6 +592,58 @@ public class SharePointClient : IDisposable
             }
         }
         return value;
+    }
+
+    private static string BuildBreadcrumbs(string title, List<HeadingSpan> headings, int position)
+    {
+        var levels = new SortedDictionary<int, string>();
+        foreach (var h in headings.Where(h => h.Start <= position).OrderBy(h => h.Start))
+        {
+            levels[h.Level] = h.Text;
+            foreach (var key in levels.Keys.Where(k => k > h.Level).ToList())
+                levels.Remove(key);
+        }
+        var parts = new List<string> { title };
+        parts.AddRange(levels.OrderBy(k => k.Key).Select(k => k.Value));
+        return string.Join(" > ", parts);
+    }
+
+    private static string? GetSectionHeading(List<HeadingSpan> headings, int position)
+    {
+        return headings.Where(h => h.Start <= position).OrderByDescending(h => h.Start).FirstOrDefault()?.Text;
+    }
+
+    private static int? DeterminePage(List<int> pageStarts, int position)
+    {
+        if (pageStarts == null || pageStarts.Count == 0) return null;
+        for (int i = 0; i < pageStarts.Count; i++)
+        {
+            if (i == pageStarts.Count - 1 || position < pageStarts[i + 1])
+                return i + 1;
+        }
+        return pageStarts.Count;
+    }
+
+    private static string GetMimeType(string extension) => extension switch
+    {
+        ".pdf" => "application/pdf",
+        ".docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".txt" => "text/plain",
+        ".md" => "text/markdown",
+        _ => "application/octet-stream"
+    };
+
+    private static string ExtractSite(string url)
+    {
+        var parts = url.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length > 1 ? parts[1] : string.Empty;
+    }
+
+    private static string ExtractLibrary(string url)
+    {
+        var parts = url.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length > 2 ? parts[2] : string.Empty;
     }
 
     private static string CleanText(string text)

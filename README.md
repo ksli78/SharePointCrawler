@@ -42,18 +42,22 @@ You can override the protected `SendToExternalApiAsync` method in a derived clas
 
 ### Program
 
-The console host expects the following command‑line arguments:
+The console host accepts positional credentials followed by optional switches:
 
 ```text
-dotnet run <siteUrl> <libraryRelativeUrl> <username> <password> [domain]
+dotnet run <siteUrl> <libraryRelativeUrl> <username> <password> [domain] [options]
 ```
 
-* `siteUrl` – The base URL of your SharePoint site (e.g. `https://server/sites/DevSite`).
-* `libraryRelativeUrl` – The server‑relative path of the library or folder to crawl (e.g. `/Shared Documents`).
-* `username`/`password` – Credentials for a user with read access to the library.
-* `domain` – Optional Active Directory domain for on‑premises environments.
+**Options**
 
-The program constructs a `NetworkCredential` from the supplied account and iterates through all files returned by the crawler, printing basic information (name, URL and size).  Modify the loop to implement your own business logic.
+* `--mode <all|titles>` – crawl entire library or only documents whose titles match a provided list.
+* `--titles-file <path>` – newline‑separated file of titles used when `--mode titles` is selected.
+* `--titles "TitleA;TitleB"` – inline semicolon separated titles.
+* `--collection <name>` – AdamPY embedding collection (defaults to `docs_v2` or `CRAWLER_COLLECTION` env var).
+* `--chunk-size-tokens <n>` / `--chunk-overlap-tokens <n>` – token based chunk sizing (defaults 350/80).
+* `--max-docs <n>` – optionally limit number of documents for testing.
+
+The program constructs a `NetworkCredential` from the supplied account and iterates through all files returned by the crawler.  Each document is tokenized into heading‑aware chunks before being posted to the local AdamPY embedding API.
 
 ## Building and running
 
