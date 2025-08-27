@@ -392,37 +392,65 @@ public class SharePointClient : IDisposable
             AssociationIds = ExtractKeywords(doc, "Association"),
 
             FileName = doc.Name,
-            TextContent = textContent,
-            Summary = textContent != null ? GenerateSummary(textContent) : null,
-            ContentBytes = textContent is null ? Convert.ToBase64String(doc.Data) : null,
-
         };
 
         using var httpClient = new HttpClient
         {
             Timeout = TimeSpan.FromMinutes(30)
         };
-        var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
-        var content = new StringContent(json, Encoding.UTF8, "application/json");
-        
+        var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
+
         try
         {
-            var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
-
-            if (!response.IsSuccessStatusCode)
+            if (textContent != null)
             {
-                var errorString = await response.Content.ReadAsStringAsync();
-                ConsoleWindow.Error(errorString);
-                ErrorLogger.Log(doc.Name, doc.Url, errorString);
+                var summary = GenerateSummary(textContent);
+                var chunks = SplitIntoChunks(textContent, payload.ChunkSize, payload.ChunkOverlap).ToList();
+                for (var i = 0; i < chunks.Count; i++)
+                {
+                    payload.TextContent = chunks[i];
+                    payload.Summary = i == 0 ? summary : null;
+                    payload.ContentBytes = null;
+
+                    var json = JsonSerializer.Serialize(payload, jsonOptions);
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        var errorString = await response.Content.ReadAsStringAsync();
+                        ConsoleWindow.Error(errorString);
+                        ErrorLogger.Log(doc.Name, doc.Url, errorString);
+                    }
+                }
+
+                ConsoleWindow.Success($"Ingested {chunks.Count} chunks for {doc.Name} via /ingest_document");
             }
             else
             {
-                var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
-                if (resp != null)
+                payload.TextContent = null;
+                payload.Summary = null;
+                payload.ContentBytes = Convert.ToBase64String(doc.Data);
+
+                var json = JsonSerializer.Serialize(payload, jsonOptions);
+                var content = new StringContent(json, Encoding.UTF8, "application/json");
+                var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
+
+                if (!response.IsSuccessStatusCode)
                 {
-                    ConsoleWindow.Success($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
-                    if (!string.IsNullOrWhiteSpace(resp.Summary))
-                        ConsoleWindow.Info($"Summary:{resp.Summary}");
+                    var errorString = await response.Content.ReadAsStringAsync();
+                    ConsoleWindow.Error(errorString);
+                    ErrorLogger.Log(doc.Name, doc.Url, errorString);
+                }
+                else
+                {
+                    var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
+                    if (resp != null)
+                    {
+                        ConsoleWindow.Success($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
+                        if (!string.IsNullOrWhiteSpace(resp.Summary))
+                            ConsoleWindow.Info($"Summary:{resp.Summary}");
+                    }
                 }
             }
         }
@@ -567,6 +595,18 @@ public class SharePointClient : IDisposable
     {
         var sentences = Regex.Split(text, @"(?<=[\.\!\?])\s+").Where(s => !string.IsNullOrWhiteSpace(s)).ToArray();
         return string.Join(" ", sentences.Take(maxSentences));
+    }
+
+    private static IEnumerable<string> SplitIntoChunks(string text, int size, int overlap)
+    {
+        if (size <= 0) yield break;
+        var step = size - overlap;
+        if (step <= 0) step = size;
+        for (var i = 0; i < text.Length; i += step)
+        {
+            var length = Math.Min(size, text.Length - i);
+            yield return text.Substring(i, length);
+        }
     }
     private List<string> ExtractKeywords(DocumentInfo doc, string field)
     {
