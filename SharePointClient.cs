@@ -404,8 +404,10 @@ public class SharePointClient : IDisposable
         {
             if (textContent != null)
             {
+                const int chunkSize = 1400;
+                const int chunkOverlap = 300;
                 var summary = GenerateSummary(textContent);
-                var chunks = SplitIntoChunks(textContent, payload.ChunkSize, payload.ChunkOverlap).ToList();
+                var chunks = SplitIntoChunks(textContent, chunkSize, chunkOverlap).ToList();
                 for (var i = 0; i < chunks.Count; i++)
                 {
                     payload.TextContent = chunks[i];

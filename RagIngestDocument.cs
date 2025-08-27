@@ -37,9 +37,6 @@ namespace SharePointCrawler
         public string? TextContent { get; set; }
         public string? Summary { get; set; }
 
-        public int ChunkSize { get; set; } = 1400;
-        public int ChunkOverlap { get; set; } = 300;
         public bool Persist { get; set; } = false;
-
     }
 }
