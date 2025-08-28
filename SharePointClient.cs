@@ -16,6 +16,9 @@ using DocumentFormat.OpenXml.Wordprocessing;
 using DocumentFormat.OpenXml.Spreadsheet;
 using UglyToad.PdfPig;
 using System.Text.Json.Serialization;
+using DocumentFormat.OpenXml.Drawing.Charts;
+using UglyToad.PdfPig.Tokens;
+using UglyToad.PdfPig.Fonts.TrueType.Tables;
 
 namespace SharePointCrawler;
 
@@ -41,6 +44,12 @@ public class SharePointClient : IDisposable
     private static readonly Regex PageNumberRegex = new(@"^(page\s*\d+(\s*of\s*\d+)?)|^\d+$", RegexOptions.IgnoreCase);
     private static readonly Regex SignatureRegex = new(@"^(signature|signed|approved by|prepared by).*", RegexOptions.IgnoreCase);
     private static readonly Regex ToCRegex = new(@"table of contents", RegexOptions.IgnoreCase);
+
+    private HashSet<string> _allowedTitles = new HashSet<string>();
+    private int _chunkSizeTokens = 0;
+    private int _overlapTokens = 0;
+    private string _collection = "";
+
     private static readonly Dictionary<Regex, string> CategoryKeywordMap = new()
     {
         [new Regex(@"\b(hr|human resources|employee)\b", RegexOptions.IgnoreCase)] = "HR",
@@ -63,10 +72,17 @@ public class SharePointClient : IDisposable
     /// </summary>
     /// <param name="siteUrl">The base URL of the SharePoint site.</param>
     /// <param name="credential">Windows credentials for authentication.</param>
-    public SharePointClient(string siteUrl, NetworkCredential? credential)
+    public SharePointClient(string siteUrl, NetworkCredential? credential, HashSet<string> allowedTitles, int chunkSizeTokens, int overlapTokens, string collection)
     {
         if (string.IsNullOrWhiteSpace(siteUrl))
             throw new ArgumentException("Site URL must be provided", nameof(siteUrl));
+
+
+        _allowedTitles = allowedTitles;
+        _chunkSizeTokens = chunkSizeTokens;
+        _overlapTokens = overlapTokens;
+        _collection = collection;
+
 
         // Trim trailing slashes from the site URL so we don't end up with
         // duplicate separators when constructing endpoint URIs.
@@ -183,6 +199,12 @@ public class SharePointClient : IDisposable
                             try
                             {
                                 docInfo = await FetchFileInfoAsync(fileElement).ConfigureAwait(false);
+                                if (_allowedTitles != null && !_allowedTitles.Contains(docInfo.Name) &&
+
+                                    !_allowedTitles.Contains(docInfo.Metadata.GetValueOrDefault("Title")?.ToString()))
+                                    continue;
+
+
                                 ConsoleWindow.StartDocument(docInfo, start);
                                 await SendToExternalApiAsync(docInfo).ConfigureAwait(false);
                                 var elapsed = DateTime.Now - start;
@@ -309,21 +331,37 @@ public class SharePointClient : IDisposable
 
         return doc;
     }
+    private static IList<string> Tokenize(string text)
+    {
+        // naïve tokenizer: split on whitespace and punctuation
+        return text?
+            .Split(new[] { ' ', '\n', '\r', '\t', '.', ',', ';', ':', '-', '(', ')', '[', ']', '{', '}', '!', '?', '"' }, StringSplitOptions.RemoveEmptyEntries)
+            .ToList() ?? new List<string>();
+    }
 
-    /// <summary>
-    /// A stub that can be overridden to send a document to an external API.  By
-    /// default this method simply completes.  When building your own
-    /// integration you can replace the body of this method with logic to
-    /// transform <see cref="DocumentInfo"/> instances or post them to another
-    /// service.  If network or database calls are required the method can be
-    /// made asynchronous.
-    /// </summary>
-    /// <param name="doc">The document information to send.</param>
-    protected virtual async Task SendToExternalApiAsync(DocumentInfo doc)
+    private static List<string> SplitIntoChunks(string text, int chunkSize, int overlap)
+    {
+        var tokens = Tokenize(text);
+        var chunks = new List<string>();
+        for (int start = 0; start < tokens.Count; start += (chunkSize - overlap))
+        {
+            var window = tokens.Skip(start).Take(chunkSize).ToList();
+            if (window.Count == 0) break;
+            chunks.Add(string.Join(" ", window));
+            if (start + chunkSize >= tokens.Count) break;
+        }
+        return chunks;
+    }
+    private string BuildBreadcrumbs(DocumentInfo doc)
+    {
+        string? title = doc.Metadata.TryGetValue("Title", out var t) ? t?.ToString() : doc.Name;
+        return title ?? "";
+    }
+
+    protected async Task SendToExternalApiAsync(DocumentInfo doc)
     {
         string? textContent = null;
         var extension = Path.GetExtension(doc.Name).ToLowerInvariant();
-
         try
         {
             switch (extension)
@@ -333,7 +371,8 @@ public class SharePointClient : IDisposable
                     textContent = Encoding.UTF8.GetString(doc.Data);
                     break;
                 case ".pdf":
-                    textContent = ExtractPdfText(doc.Data);
+                    PdfToMarkdownConverter converter = new PdfToMarkdownConverter();
+                    textContent = converter.ConvertToMarkdown(doc.Data);// ExtractPdfText(doc.Data);
                     break;
                 case ".docx":
                     textContent = ExtractWordText(doc.Data);
@@ -360,78 +399,210 @@ public class SharePointClient : IDisposable
             }
         }
 
-        var originalTitle = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : null;
-        var derivedTitle = DeriveTitle(originalTitle, textContent ?? string.Empty, doc.Name);
-        var categoryMeta = doc.Metadata.TryGetValue("Category", out var categoryValue) ? categoryValue?.ToString() : null;
-        var detectedCategory = DetectCategory(textContent ?? string.Empty) ?? categoryMeta ?? "All Documents";
-        var metaKeywords = ExtractKeywords(doc, "Keywords");
-        var contentKeywords = GenerateKeywords(textContent ?? string.Empty);
-        var allKeywords = metaKeywords.Concat(contentKeywords).Where(k => !string.IsNullOrWhiteSpace(k)).Distinct().ToList();
 
-        var payload = new RagIngestDocument
+
+        var breadcrumbs = BuildBreadcrumbs(doc);
+        var chunks = textContent != null
+            ? SplitIntoChunks(textContent, _chunkSizeTokens, _overlapTokens)
+            : new List<string> { null }; // fallback to whole file if no text
+
+        foreach (var (chunkText, idx) in chunks.Select((c, i) => (c, i)))
         {
-            SpWebUrl = $"{_rootUrl}{doc.Url}",
-            SpItemId = doc.Metadata.TryGetValue("UniqueId", out var id) ? id?.ToString() : null,
-            ETag = doc.Metadata.TryGetValue("ETag", out var etag) ? etag?.ToString() : null,
 
-            Title = derivedTitle,
-            Org = doc.Metadata.TryGetValue("Org", out var org) ? org?.ToString() : null,
-            OrgCode = doc.Metadata.TryGetValue("Org_x0020_Code", out var orgCode) ? orgCode?.ToString() : null,
-            Category = detectedCategory,
-            DocCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var docCode) ? docCode?.ToString() : null,
-            Owner = doc.Metadata.TryGetValue("Owner0", out var owner) ? owner?.ToString() : null,
-            Version = doc.Metadata.TryGetValue("Version_", out var version) ? version?.ToString() : null,
-
-            RevisionDate = doc.Metadata.TryGetValue("Revision_x0020_Date", out var rev) ? rev?.ToString() : null,
-            LatestReviewDate = doc.Metadata.TryGetValue("Latest_x0020_Review_x0020_Date", out var latest) ? latest?.ToString() : null,
-            DocumentReviewDate = doc.Metadata.TryGetValue("aaaa", out var docReview) ? docReview?.ToString() : null,
-            ReviewApprovalDate = doc.Metadata.TryGetValue("Review_x0020_Approval_x0020_Date", out var approval) ? approval?.ToString() : null,
-
-            Keywords = allKeywords,
-            EnterpriseKeywords = ExtractKeywords(doc, "TaxKeyword"),
-            AssociationIds = ExtractKeywords(doc, "Association"),
-
-            FileName = doc.Name,
-            TextContent = textContent,
-            Summary = textContent != null ? GenerateSummary(textContent) : null,
-            ContentBytes = textContent is null ? Convert.ToBase64String(doc.Data) : null,
-
-        };
-
-        using var httpClient = new HttpClient
-        {
-            Timeout = TimeSpan.FromMinutes(30)
-        };
-        var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
-        var content = new StringContent(json, Encoding.UTF8, "application/json");
-        
-        try
-        {
-            var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
-
-            if (!response.IsSuccessStatusCode)
+            var payload = new RagIngestDocument
             {
-                var errorString = await response.Content.ReadAsStringAsync();
-                ConsoleWindow.Error(errorString);
-                ErrorLogger.Log(doc.Name, doc.Url, errorString);
-            }
-            else
+                SpWebUrl = $"{_rootUrl}{doc.Url}",
+                SpItemId = doc.Metadata.TryGetValue("UniqueId", out var id) ? id?.ToString() : null,
+                ETag = doc.Metadata.TryGetValue("ETag", out var etag) ? etag?.ToString() : null,
+
+                Org = doc.Metadata.TryGetValue("Org", out var org) ? org?.ToString() : null,
+                OrgCode = doc.Metadata.TryGetValue("Org_x0020_Code", out var orgCode) ? orgCode?.ToString() : null,
+
+                DocCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var docCode) ? docCode?.ToString() : null,
+                Owner = doc.Metadata.TryGetValue("Owner0", out var owner) ? owner?.ToString() : null,
+                Version = doc.Metadata.TryGetValue("Version_", out var version) ? version?.ToString() : null,
+
+                RevisionDate = doc.Metadata.TryGetValue("Revision_x0020_Date", out var rev) ? rev?.ToString() : null,
+                LatestReviewDate = doc.Metadata.TryGetValue("Latest_x0020_Review_x0020_Date", out var latest) ? latest?.ToString() : null,
+                DocumentReviewDate = doc.Metadata.TryGetValue("aaaa", out var docReview) ? docReview?.ToString() : null,
+                ReviewApprovalDate = doc.Metadata.TryGetValue("Review_x0020_Approval_x0020_Date", out var approval) ? approval?.ToString() : null,
+                EnterpriseKeywords = ExtractKeywords(doc, "TaxKeyword"),
+                AssociationIds = ExtractKeywords(doc, "Association"),
+                TextContent = textContent,
+                Summary = textContent != null ? GenerateSummary(textContent) : null,
+                ContentBytes = textContent is null ? Convert.ToBase64String(doc.Data) : null,
+                FileName = doc.Name,
+                Title = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : doc.Name,
+                Collection = _collection, // new property: the collection to ingest into (e.g., docs_v2)
+                ChunkIndex = idx,
+                Breadcrumbs = breadcrumbs,
+                ChunkSize = _chunkSizeTokens,
+                ChunkOverlap = _overlapTokens
+            };
+
+            // POST to your local AdamPY endpoint (update URL if needed)
+            var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+
+            using var httpClient = new HttpClient
             {
-                var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
-                if (resp != null)
+                Timeout = TimeSpan.FromMinutes(30)
+            };
+
+            try
+            {
+                var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
+
+                if (!response.IsSuccessStatusCode)
                 {
-                    ConsoleWindow.Success($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
-                    if (!string.IsNullOrWhiteSpace(resp.Summary))
-                        ConsoleWindow.Info($"Summary:{resp.Summary}");
+                    var errorString = await response.Content.ReadAsStringAsync();
+                    ConsoleWindow.Error(errorString);
+                    ErrorLogger.Log(doc.Name, doc.Url, errorString);
+                }
+                else
+                {
+                    var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
+                    if (resp != null)
+                    {
+                        ConsoleWindow.Success($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
+                        if (!string.IsNullOrWhiteSpace(resp.Summary))
+                            ConsoleWindow.Info($"Summary:{resp.Summary}");
+                    }
                 }
             }
-        }
-        catch (Exception ex)
-        {
-            ConsoleWindow.Error(ex.ToString());
-            ErrorLogger.Log(doc.Name, doc.Url, ex.ToString());
+            catch (Exception ex)
+            {
+                ConsoleWindow.Error(ex.ToString());
+                ErrorLogger.Log(doc.Name, doc.Url, ex.ToString());
+            }
         }
     }
+
+
+
+    /// <summary>
+    /// A stub that can be overridden to send a document to an external API.  By
+    /// default this method simply completes.  When building your own
+    /// integration you can replace the body of this method with logic to
+    /// transform <see cref="DocumentInfo"/> instances or post them to another
+    /// service.  If network or database calls are required the method can be
+    /// made asynchronous.
+    /// </summary>
+    /// <param name="doc">The document information to send.</param>
+    //protected virtual async Task SendToExternalApiAsync(DocumentInfo doc)
+    //{
+    //    string? textContent = null;
+    //    var extension = Path.GetExtension(doc.Name).ToLowerInvariant();
+
+    //    try
+    //    {
+    //        switch (extension)
+    //        {
+    //            case ".txt":
+    //            case ".md":
+    //                textContent = Encoding.UTF8.GetString(doc.Data);
+    //                break;
+    //            case ".pdf":
+    //                textContent = ExtractPdfText(doc.Data);
+    //                break;
+    //            case ".docx":
+    //                textContent = ExtractWordText(doc.Data);
+    //                break;
+    //            case ".xlsx":
+    //                textContent = ExtractExcelText(doc.Data);
+    //                break;
+    //        }
+    //    }
+    //    catch (Exception ex)
+    //    {
+    //        var msg = $"Failed to extract text for {doc.Name}: {ex.Message}";
+    //        ConsoleWindow.Error(msg);
+    //        ErrorLogger.Log(doc.Name, doc.Url, msg);
+    //    }
+
+    //    if (textContent != null)
+    //    {
+    //        textContent = CleanText(textContent);
+    //        if (string.IsNullOrWhiteSpace(textContent) || textContent.Length < 500)
+    //        {
+    //            ConsoleWindow.Info($"Skipping {doc.Name} due to insufficient content ({textContent?.Length ?? 0} chars).");
+    //            return;
+    //        }
+    //    }
+
+    //    var originalTitle = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : null;
+    //    var derivedTitle = DeriveTitle(originalTitle, textContent ?? string.Empty, doc.Name);
+    //    var categoryMeta = doc.Metadata.TryGetValue("Category", out var categoryValue) ? categoryValue?.ToString() : null;
+    //    var detectedCategory = DetectCategory(textContent ?? string.Empty) ?? categoryMeta ?? "All Documents";
+    //    var metaKeywords = ExtractKeywords(doc, "Keywords");
+    //    var contentKeywords = GenerateKeywords(textContent ?? string.Empty);
+    //    var allKeywords = metaKeywords.Concat(contentKeywords).Where(k => !string.IsNullOrWhiteSpace(k)).Distinct().ToList();
+
+    //    var payload = new RagIngestDocument
+    //    {
+    //        SpWebUrl = $"{_rootUrl}{doc.Url}",
+    //        SpItemId = doc.Metadata.TryGetValue("UniqueId", out var id) ? id?.ToString() : null,
+    //        ETag = doc.Metadata.TryGetValue("ETag", out var etag) ? etag?.ToString() : null,
+
+    //        Title = derivedTitle,
+    //        Org = doc.Metadata.TryGetValue("Org", out var org) ? org?.ToString() : null,
+    //        OrgCode = doc.Metadata.TryGetValue("Org_x0020_Code", out var orgCode) ? orgCode?.ToString() : null,
+    //        Category = detectedCategory,
+    //        DocCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var docCode) ? docCode?.ToString() : null,
+    //        Owner = doc.Metadata.TryGetValue("Owner0", out var owner) ? owner?.ToString() : null,
+    //        Version = doc.Metadata.TryGetValue("Version_", out var version) ? version?.ToString() : null,
+
+    //        RevisionDate = doc.Metadata.TryGetValue("Revision_x0020_Date", out var rev) ? rev?.ToString() : null,
+    //        LatestReviewDate = doc.Metadata.TryGetValue("Latest_x0020_Review_x0020_Date", out var latest) ? latest?.ToString() : null,
+    //        DocumentReviewDate = doc.Metadata.TryGetValue("aaaa", out var docReview) ? docReview?.ToString() : null,
+    //        ReviewApprovalDate = doc.Metadata.TryGetValue("Review_x0020_Approval_x0020_Date", out var approval) ? approval?.ToString() : null,
+
+    //        Keywords = allKeywords,
+    //        EnterpriseKeywords = ExtractKeywords(doc, "TaxKeyword"),
+    //        AssociationIds = ExtractKeywords(doc, "Association"),
+
+    //        FileName = doc.Name,
+    //        TextContent = textContent,
+    //        Summary = textContent != null ? GenerateSummary(textContent) : null,
+    //        ContentBytes = textContent is null ? Convert.ToBase64String(doc.Data) : null,
+
+    //    };
+
+    //    using var httpClient = new HttpClient
+    //    {
+    //        Timeout = TimeSpan.FromMinutes(30)
+    //    };
+    //    var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
+    //    var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+    //    try
+    //    {
+    //        var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
+
+    //        if (!response.IsSuccessStatusCode)
+    //        {
+    //            var errorString = await response.Content.ReadAsStringAsync();
+    //            ConsoleWindow.Error(errorString);
+    //            ErrorLogger.Log(doc.Name, doc.Url, errorString);
+    //        }
+    //        else
+    //        {
+    //            var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
+    //            if (resp != null)
+    //            {
+    //                ConsoleWindow.Success($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
+    //                if (!string.IsNullOrWhiteSpace(resp.Summary))
+    //                    ConsoleWindow.Info($"Summary:{resp.Summary}");
+    //            }
+    //        }
+    //    }
+    //    catch (Exception ex)
+    //    {
+    //        ConsoleWindow.Error(ex.ToString());
+    //        ErrorLogger.Log(doc.Name, doc.Url, ex.ToString());
+    //    }
+    //}
 
     private static string ExtractPdfText(byte[] data)
     {
@@ -491,7 +662,7 @@ public class SharePointClient : IDisposable
     {
         var value = cell.CellValue?.InnerText ?? string.Empty;
         if (cell.DataType?.Value == CellValues.SharedString)
-        {             
+        {
             var sstPart = wbPart.SharedStringTablePart;
             if (sstPart != null)
             {

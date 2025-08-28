@@ -41,5 +41,10 @@ namespace SharePointCrawler
         public int ChunkOverlap { get; set; } = 300;
         public bool Persist { get; set; } = false;
 
+        public string Collection { get; set; } = "docs";
+        public string Breadcrumbs { get; set; } = ""; 
+        public int ChunkIndex { get; set; } = 0;
+
+
     }
 }
