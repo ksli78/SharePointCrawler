@@ -19,6 +19,8 @@ using System.Text.Json.Serialization;
 using DocumentFormat.OpenXml.Drawing.Charts;
 using UglyToad.PdfPig.Tokens;
 using UglyToad.PdfPig.Fonts.TrueType.Tables;
+using SharePointCrawler.Foundation.Models;
+using DocumentFormat.OpenXml.Office2010.Excel;
 
 namespace SharePointCrawler;
 
@@ -406,76 +408,104 @@ public class SharePointClient : IDisposable
             ? SplitIntoChunks(textContent, _chunkSizeTokens, _overlapTokens)
             : new List<string> { null }; // fallback to whole file if no text
 
+       
+        List<IngestChunk> ingestChunks = new List<IngestChunk>();   
+
         foreach (var (chunkText, idx) in chunks.Select((c, i) => (c, i)))
         {
-
-            var payload = new RagIngestDocument
+            var inChunk = new IngestChunk()
             {
+                AllowedGroups = ["everyone"],
                 SpWebUrl = $"{_rootUrl}{doc.Url}",
                 SpItemId = doc.Metadata.TryGetValue("UniqueId", out var id) ? id?.ToString() : null,
                 ETag = doc.Metadata.TryGetValue("ETag", out var etag) ? etag?.ToString() : null,
-
+                Title = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : doc.Name,
+                FileName = doc.Name,
+                TextContent = chunkText,
+                ContentBytes =  textContent is null ? Convert.ToBase64String(doc.Data) : null,
+                Collection = _collection,
+                ChunkIndex = idx,
+                Breadcrumbs = breadcrumbs,
+                ChunkSize = _chunkSizeTokens,
+                ChunkOverlap = _overlapTokens,
                 Org = doc.Metadata.TryGetValue("Org", out var org) ? org?.ToString() : null,
                 OrgCode = doc.Metadata.TryGetValue("Org_x0020_Code", out var orgCode) ? orgCode?.ToString() : null,
-
                 DocCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var docCode) ? docCode?.ToString() : null,
                 Owner = doc.Metadata.TryGetValue("Owner0", out var owner) ? owner?.ToString() : null,
                 Version = doc.Metadata.TryGetValue("Version_", out var version) ? version?.ToString() : null,
-
                 RevisionDate = doc.Metadata.TryGetValue("Revision_x0020_Date", out var rev) ? rev?.ToString() : null,
                 LatestReviewDate = doc.Metadata.TryGetValue("Latest_x0020_Review_x0020_Date", out var latest) ? latest?.ToString() : null,
                 DocumentReviewDate = doc.Metadata.TryGetValue("aaaa", out var docReview) ? docReview?.ToString() : null,
                 ReviewApprovalDate = doc.Metadata.TryGetValue("Review_x0020_Approval_x0020_Date", out var approval) ? approval?.ToString() : null,
                 EnterpriseKeywords = ExtractKeywords(doc, "TaxKeyword"),
                 AssociationIds = ExtractKeywords(doc, "Association"),
-                TextContent = textContent,
                 Summary = textContent != null ? GenerateSummary(textContent) : null,
-                ContentBytes = textContent is null ? Convert.ToBase64String(doc.Data) : null,
-                FileName = doc.Name,
-                Title = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : doc.Name,
-                Collection = _collection, // new property: the collection to ingest into (e.g., docs_v2)
-                ChunkIndex = idx,
-                Breadcrumbs = breadcrumbs,
-                ChunkSize = _chunkSizeTokens,
-                ChunkOverlap = _overlapTokens
             };
+          
+            ingestChunks.Add(inChunk);
+        }
 
-            // POST to your local AdamPY endpoint (update URL if needed)
-            var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+        var ingestRequest = new IngestRequest()
+        {
+            Chunks = ingestChunks,
+        };
 
 
-            using var httpClient = new HttpClient
+        //var payload = new RagIngestDocument
+        //{   
+        //    Org = doc.Metadata.TryGetValue("Org", out var org) ? org?.ToString() : null,
+        //    OrgCode = doc.Metadata.TryGetValue("Org_x0020_Code", out var orgCode) ? orgCode?.ToString() : null,
+        //    DocCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var docCode) ? docCode?.ToString() : null,
+        //    Owner = doc.Metadata.TryGetValue("Owner0", out var owner) ? owner?.ToString() : null,
+        //    Version = doc.Metadata.TryGetValue("Version_", out var version) ? version?.ToString() : null,
+        //    RevisionDate = doc.Metadata.TryGetValue("Revision_x0020_Date", out var rev) ? rev?.ToString() : null,
+        //    LatestReviewDate = doc.Metadata.TryGetValue("Latest_x0020_Review_x0020_Date", out var latest) ? latest?.ToString() : null,
+        //    DocumentReviewDate = doc.Metadata.TryGetValue("aaaa", out var docReview) ? docReview?.ToString() : null,
+        //    ReviewApprovalDate = doc.Metadata.TryGetValue("Review_x0020_Approval_x0020_Date", out var approval) ? approval?.ToString() : null,
+        //    EnterpriseKeywords = ExtractKeywords(doc, "TaxKeyword"),
+        //    AssociationIds = ExtractKeywords(doc, "Association"),
+        //    Summary = textContent != null ? GenerateSummary(textContent) : null,
+        //    ChunkSize = _chunkSizeTokens,
+        //    ChunkOverlap = _overlapTokens,
+        //    Chunks = ingestChunks 
+        //};
+
+        // POST to your local AdamPY endpoint (update URL if needed)
+        var json = JsonSerializer.Serialize(ingestRequest, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
+        var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+
+        using var httpClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromMinutes(30)
+        };
+
+        try
+        {
+            var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
+
+            if (!response.IsSuccessStatusCode)
             {
-                Timeout = TimeSpan.FromMinutes(30)
-            };
-
-            try
+                var errorString = await response.Content.ReadAsStringAsync();
+                ConsoleWindow.Error(errorString);
+                ErrorLogger.Log(doc.Name, doc.Url, errorString);
+            }
+            else
             {
-                var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
-
-                if (!response.IsSuccessStatusCode)
+                var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
+                if (resp != null)
                 {
-                    var errorString = await response.Content.ReadAsStringAsync();
-                    ConsoleWindow.Error(errorString);
-                    ErrorLogger.Log(doc.Name, doc.Url, errorString);
-                }
-                else
-                {
-                    var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
-                    if (resp != null)
-                    {
-                        ConsoleWindow.Success($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
-                        if (!string.IsNullOrWhiteSpace(resp.Summary))
-                            ConsoleWindow.Info($"Summary:{resp.Summary}");
-                    }
+                    ConsoleWindow.Success($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
+                    if (!string.IsNullOrWhiteSpace(resp.Summary))
+                        ConsoleWindow.Info($"Summary:{resp.Summary}");
                 }
             }
-            catch (Exception ex)
-            {
-                ConsoleWindow.Error(ex.ToString());
-                ErrorLogger.Log(doc.Name, doc.Url, ex.ToString());
-            }
+        }
+        catch (Exception ex)
+        {
+            ConsoleWindow.Error(ex.ToString());
+            ErrorLogger.Log(doc.Name, doc.Url, ex.ToString());
         }
     }
 
