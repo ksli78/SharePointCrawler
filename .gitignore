@@ -26,6 +26,11 @@ SharePointCrawler.csproj.nuget.g.props
 SharePointCrawler.csproj.nuget.g.targets
 project.assets.json
 project.nuget.cache
+bin/
+obj/
 /.vs/SharePointCrawler/FileContentIndex/269b4b4c-b8e5-4764-a44d-6601af2d540f.vsidx
 IngestResponse.cs
 36af713b-4168-4b87-b658-945c7babadd8.vsidx
+ProjectEvaluation
+FileContentIndex
+v17

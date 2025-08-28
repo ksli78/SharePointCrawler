@@ -18,6 +18,14 @@ public static class Program
 {
     public static async Task Main(string[] args)
     {
+        // Default settings
+        string mode = "all";
+        string? titlesFile = null;
+        string? titlesList = null;
+        string collection = "docs_v2";
+        int chunkSizeTokens = 350;
+        int overlapTokens = 80;
+
         if (args.Length < 4)
         {
             Console.WriteLine("Usage: dotnet run <siteUrl> <libraryRelativeUrl> <username> <password> [domain]");
@@ -36,14 +44,39 @@ public static class Program
         var password = args[3];
         var domain = args.Length > 4 ? args[4] : string.Empty;
 
+
+        // Parse optional named arguments
+        foreach (var arg in args.Skip(4))
+        {
+            if (arg.StartsWith("--mode=")) mode = arg.Split('=')[1];
+            else if (arg.StartsWith("--titles-file=")) titlesFile = arg.Split('=')[1];
+            else if (arg.StartsWith("--titles=")) titlesList = arg.Split('=')[1];
+            else if (arg.StartsWith("--collection=")) collection = arg.Split('=')[1];
+            else if (arg.StartsWith("--chunk-size-tokens=")) chunkSizeTokens = int.Parse(arg.Split('=')[1]);
+            else if (arg.StartsWith("--chunk-overlap-tokens=")) overlapTokens = int.Parse(arg.Split('=')[1]);
+        }
+
+        HashSet<string> allowedTitles = new();
+        if (mode == "titles")
+        {
+            allowedTitles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(titlesFile))
+                allowedTitles.UnionWith(File.ReadAllLines(titlesFile).Where(l => !string.IsNullOrWhiteSpace(l)));
+            if (!string.IsNullOrWhiteSpace(titlesList))
+                allowedTitles.UnionWith(titlesList.Split(';').Select(s => s.Trim()).Where(s => s.Length > 0));
+        }
+
+
         // Create the credential.  If a domain is supplied we include it;
         // otherwise we assume a local machine account.
         NetworkCredential credential = new(username, password, domain);
 
-        using var client = new SharePointClient(siteUrl, credential);
+        ConsoleWindow.Initialize();
+
+        using var client = new SharePointClient(siteUrl, credential, allowedTitles,chunkSizeTokens,overlapTokens,collection);
         await foreach (var doc in client.GetDocumentsAsync(libraryRelativeUrl))
         {
-            Console.WriteLine($"Fetched {doc.Name} from {doc.Url} ({doc.Data.Length} bytes)");
+            // Processing feedback is handled by SharePointClient via ConsoleWindow.
         }
     }
 }
