@@ -422,6 +422,7 @@ public class SharePointClient : IDisposable
                 Title = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : doc.Name,
                 FileName = doc.Name,
                 TextContent = chunkText,
+               
                 ContentBytes =  textContent is null ? Convert.ToBase64String(doc.Data) : null,
                 Collection = _collection,
                 ChunkIndex = idx,
