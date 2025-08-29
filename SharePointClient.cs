@@ -51,7 +51,10 @@ public class SharePointClient : IDisposable
     private int _chunkSizeTokens = 0;
     private int _overlapTokens = 0;
     private string _collection = "";
-
+    private string logFile = "log.txt";
+    private StreamWriter _writer;
+   
+    
     private static readonly Dictionary<Regex, string> CategoryKeywordMap = new()
     {
         [new Regex(@"\b(hr|human resources|employee)\b", RegexOptions.IgnoreCase)] = "HR",
@@ -74,7 +77,7 @@ public class SharePointClient : IDisposable
     /// </summary>
     /// <param name="siteUrl">The base URL of the SharePoint site.</param>
     /// <param name="credential">Windows credentials for authentication.</param>
-    public SharePointClient(string siteUrl, NetworkCredential? credential, HashSet<string> allowedTitles, int chunkSizeTokens, int overlapTokens, string collection)
+    public SharePointClient(string siteUrl, NetworkCredential? credential, HashSet<string>? allowedTitles, int chunkSizeTokens, int overlapTokens, string collection)
     {
         if (string.IsNullOrWhiteSpace(siteUrl))
             throw new ArgumentException("Site URL must be provided", nameof(siteUrl));
@@ -116,6 +119,8 @@ public class SharePointClient : IDisposable
         _client.DefaultRequestHeaders.Add("Prefer", "odata=minimalmetadata");
 
         _client.DefaultRequestHeaders.Add("X-FORMS_BASED_AUTH_ACCEPTED", "f");
+
+        _writer = new StreamWriter(logFile, true); 
     }
 
     /// <summary>
@@ -135,6 +140,8 @@ public class SharePointClient : IDisposable
         if (string.IsNullOrWhiteSpace(libraryRelativeUrl))
             throw new ArgumentException("Library relative URL must be provided", nameof(libraryRelativeUrl));
 
+        _writer.WriteLine($" Url:{libraryRelativeUrl}");
+
         // Ensure the relative URL starts with a forward slash.
         var normalizedRelativeUrl = libraryRelativeUrl.StartsWith("/") ? libraryRelativeUrl.Substring(1) : libraryRelativeUrl;
         normalizedRelativeUrl = normalizedRelativeUrl.EndsWith("?$expand=Folders,Files") ? normalizedRelativeUrl : $"{normalizedRelativeUrl}?$expand=Folders,Files";
@@ -153,7 +160,9 @@ public class SharePointClient : IDisposable
 
                 using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
                 using var document = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
-
+                var json =JsonSerializer.Serialize(document);
+                _writer.WriteLine(json);
+                _writer.WriteLine("------------------------------------");
                 // Detect whether the JSON payload is wrapped in a top‑level "d" property
                 // (verbose OData) or not (minimal metadata).  Some SharePoint
                 // configurations return the entity directly without a wrapper, as
@@ -201,9 +210,7 @@ public class SharePointClient : IDisposable
                             try
                             {
                                 docInfo = await FetchFileInfoAsync(fileElement).ConfigureAwait(false);
-                                if (_allowedTitles != null && !_allowedTitles.Contains(docInfo.Name) &&
-
-                                    !_allowedTitles.Contains(docInfo.Metadata.GetValueOrDefault("Title")?.ToString()))
+                                if (_allowedTitles != null && !_allowedTitles.Contains(docInfo.Name) && !_allowedTitles.Contains(docInfo.Metadata.GetValueOrDefault("Title")?.ToString()))
                                     continue;
 
 
@@ -236,6 +243,7 @@ public class SharePointClient : IDisposable
                 // array itself depending on the metadata level.
                 if (root.TryGetProperty("Folders", out var foldersElement))
                 {
+                    
                     JsonElement folderArray;
                     // As with Files, check if Folders is an array before reading the
                     // "results" property to avoid invalid operations.
@@ -314,10 +322,11 @@ public class SharePointClient : IDisposable
         // Download the binary data for the file using the $value endpoint.  The
         // REST syntax for downloading a file is documented by Microsoft; you
         // call GetFileByServerRelativeUrl and append $value【497258984103498†L142-L163】.
-        if (!string.IsNullOrWhiteSpace(doc.Url))
+        if (!string.IsNullOrWhiteSpace(doc.Url) && doc.Url.EndsWith("aspx") != true )
         {
             var escapedUrl = doc.Url.Replace("'", "''");
             var fileEndpoint = $"{_siteUrl}/_api/web/GetFileByServerRelativeUrl('{escapedUrl}')/$value";
+            
             using var fileResponse = await _client.GetAsync(fileEndpoint).ConfigureAwait(false);
             if (fileResponse.IsSuccessStatusCode)
             {
@@ -417,7 +426,7 @@ public class SharePointClient : IDisposable
             {
                 AllowedGroups = ["everyone"],
                 SpWebUrl = $"{_rootUrl}{doc.Url}",
-                SpItemId = doc.Metadata.TryGetValue("UniqueId", out var id) ? id?.ToString() : null,
+                SpItemId = doc.Metadata.TryGetValue("UniqueId", out var id) ? id?.ToString() : new Guid().ToString(),
                 ETag = doc.Metadata.TryGetValue("ETag", out var etag) ? etag?.ToString() : null,
                 Title = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : doc.Name,
                 FileName = doc.Name,
@@ -798,5 +807,8 @@ public class SharePointClient : IDisposable
     public void Dispose()
     {
         _client.Dispose();
+        _writer.Flush();
+        _writer.Close();    
+        _writer.Dispose();
     }
 }

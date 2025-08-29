@@ -56,9 +56,10 @@ public static class Program
             else if (arg.StartsWith("--chunk-overlap-tokens=")) overlapTokens = int.Parse(arg.Split('=')[1]);
         }
 
-        HashSet<string> allowedTitles = new();
+        HashSet<string>? allowedTitles = null;
         if (mode == "titles")
         {
+            allowedTitles = new HashSet<string>();
             allowedTitles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             if (!string.IsNullOrWhiteSpace(titlesFile))
                 allowedTitles.UnionWith(File.ReadAllLines(titlesFile).Where(l => !string.IsNullOrWhiteSpace(l)));
