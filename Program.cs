@@ -39,7 +39,8 @@ public static class Program
         }
 
         var siteUrl = args[0];
-        var libraryRelativeUrl = $"{siteUrl}/_api/web/GetFolderByServerRelativeUrl('{args[1]}')?$expand=Folders,Files";
+        var encodedLibraryPath = Uri.EscapeDataString(args[1]);
+        var libraryRelativeUrl = $"{siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encodedLibraryPath}')?$expand=Folders,Files";
         var username = args[2];
         var password = args[3];
         var domain = args.Length > 4 ? args[4] : string.Empty;

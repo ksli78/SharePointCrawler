@@ -120,7 +120,13 @@ public class SharePointClient : IDisposable
 
         _client.DefaultRequestHeaders.Add("X-FORMS_BASED_AUTH_ACCEPTED", "f");
 
-        _writer = new StreamWriter(logFile, true); 
+        _writer = new StreamWriter(logFile, true);
+    }
+
+    private void Log(string message)
+    {
+        _writer.WriteLine($"{DateTime.Now:u} {message}");
+        _writer.Flush();
     }
 
     /// <summary>
@@ -140,42 +146,36 @@ public class SharePointClient : IDisposable
         if (string.IsNullOrWhiteSpace(libraryRelativeUrl))
             throw new ArgumentException("Library relative URL must be provided", nameof(libraryRelativeUrl));
 
-        _writer.WriteLine($" Url:{libraryRelativeUrl}");
+        Log($"Enumerating folder {libraryRelativeUrl}");
 
         // Ensure the relative URL starts with a forward slash.
         var normalizedRelativeUrl = libraryRelativeUrl.StartsWith("/") ? libraryRelativeUrl.Substring(1) : libraryRelativeUrl;
         normalizedRelativeUrl = normalizedRelativeUrl.EndsWith("?$expand=Folders,Files") ? normalizedRelativeUrl : $"{normalizedRelativeUrl}?$expand=Folders,Files";
-        //normalizedRelativeUrl = UrlEncoder.Default.Encode(normalizedRelativeUrl);
         // Build the REST endpoint.  We use $expand=Folders,Files so that
         // information about both folders and files is returned in one call
         //【697898085085864†L82-L86】.
-        //var escapedRelativeUrl = normalizedRelativeUrl.Replace("'", "''");
         var endpoint = normalizedRelativeUrl;
-        try
+        using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
+
+        if (response.IsSuccessStatusCode)
         {
-            using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
 
-            if (response.IsSuccessStatusCode)
+            using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+            using var document = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
+            Log($"Retrieved metadata for folder {libraryRelativeUrl}");
+            // Detect whether the JSON payload is wrapped in a top‑level "d" property
+            // (verbose OData) or not (minimal metadata).  Some SharePoint
+            // configurations return the entity directly without a wrapper, as
+            // illustrated by the sample response provided in the user's report.
+            JsonElement root;
+            if (document.RootElement.TryGetProperty("d", out var dProperty))
             {
-
-                using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
-                using var document = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
-                var json =JsonSerializer.Serialize(document);
-                _writer.WriteLine(json);
-                _writer.WriteLine("------------------------------------");
-                // Detect whether the JSON payload is wrapped in a top‑level "d" property
-                // (verbose OData) or not (minimal metadata).  Some SharePoint
-                // configurations return the entity directly without a wrapper, as
-                // illustrated by the sample response provided in the user's report.
-                JsonElement root;
-                if (document.RootElement.TryGetProperty("d", out var dProperty))
-                {
-                    root = dProperty;
-                }
-                else
-                {
-                    root = document.RootElement;
-                }
+                root = dProperty;
+            }
+            else
+            {
+                root = document.RootElement;
+            }
 
                 // Enumerate files first.  In verbose responses the Files collection
                 // contains a "results" property with the actual array.  In minimal
@@ -213,10 +213,12 @@ public class SharePointClient : IDisposable
                                 if (_allowedTitles != null && !_allowedTitles.Contains(docInfo.Name) && !_allowedTitles.Contains(docInfo.Metadata.GetValueOrDefault("Title")?.ToString()))
                                     continue;
 
-
+                                Log($"Processing file {docInfo.Name} at {docInfo.Url}");
                                 ConsoleWindow.StartDocument(docInfo, start);
+                                Log($"Sending {docInfo.Name} to external API");
                                 await SendToExternalApiAsync(docInfo).ConfigureAwait(false);
                                 var elapsed = DateTime.Now - start;
+                                Log($"Completed {docInfo.Name} in {elapsed.TotalSeconds:F1}s");
                                 ConsoleWindow.CompleteDocument(docInfo, elapsed, true);
                             }
                             catch (Exception ex)
@@ -226,6 +228,7 @@ public class SharePointClient : IDisposable
                                 if (docInfo != null)
                                 {
                                     ErrorLogger.Log(docInfo.Name, docInfo.Url, ex.Message);
+                                    Log($"Error processing {docInfo.Name}: {ex.Message}");
                                     ConsoleWindow.CompleteDocument(docInfo, elapsed, false, ex.Message);
                                     docInfo = null;
                                 }
@@ -265,8 +268,14 @@ public class SharePointClient : IDisposable
                         foreach (var folderElement in folderArray.EnumerateArray())
                         {
                             var folderRelativeUrl = folderElement.GetProperty("odata.id").GetString();
+                            if (string.IsNullOrWhiteSpace(folderRelativeUrl) && folderElement.TryGetProperty("ServerRelativeUrl", out var serverUrl))
+                            {
+                                var encoded = Uri.EscapeDataString(serverUrl.GetString() ?? string.Empty);
+                                folderRelativeUrl = $"{_siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encoded}')?$expand=Folders,Files";
+                            }
                             if (!string.IsNullOrWhiteSpace(folderRelativeUrl))
                             {
+                                Log($"Descending into folder {folderRelativeUrl}");
                                 await foreach (var nestedDoc in GetDocumentsAsync(folderRelativeUrl).ConfigureAwait(false))
                                 {
                                     yield return nestedDoc;
@@ -276,9 +285,10 @@ public class SharePointClient : IDisposable
                     }
                 }
             }
-
+        else
+        {
+            Log($"Request to {endpoint} failed with {response.StatusCode}");
         }
-        finally { }
     }
 
     /// <summary>
@@ -383,7 +393,7 @@ public class SharePointClient : IDisposable
                     break;
                 case ".pdf":
                     PdfToMarkdownConverter converter = new PdfToMarkdownConverter();
-                    textContent = converter.ConvertToMarkdown(doc.Data);// ExtractPdfText(doc.Data);
+                    textContent = converter.ConvertToMarkdown(doc.Data);
                     break;
                 case ".docx":
                     textContent = ExtractWordText(doc.Data);
@@ -462,25 +472,6 @@ public class SharePointClient : IDisposable
         };
 
 
-        //var payload = new RagIngestDocument
-        //{   
-        //    Org = doc.Metadata.TryGetValue("Org", out var org) ? org?.ToString() : null,
-        //    OrgCode = doc.Metadata.TryGetValue("Org_x0020_Code", out var orgCode) ? orgCode?.ToString() : null,
-        //    DocCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var docCode) ? docCode?.ToString() : null,
-        //    Owner = doc.Metadata.TryGetValue("Owner0", out var owner) ? owner?.ToString() : null,
-        //    Version = doc.Metadata.TryGetValue("Version_", out var version) ? version?.ToString() : null,
-        //    RevisionDate = doc.Metadata.TryGetValue("Revision_x0020_Date", out var rev) ? rev?.ToString() : null,
-        //    LatestReviewDate = doc.Metadata.TryGetValue("Latest_x0020_Review_x0020_Date", out var latest) ? latest?.ToString() : null,
-        //    DocumentReviewDate = doc.Metadata.TryGetValue("aaaa", out var docReview) ? docReview?.ToString() : null,
-        //    ReviewApprovalDate = doc.Metadata.TryGetValue("Review_x0020_Approval_x0020_Date", out var approval) ? approval?.ToString() : null,
-        //    EnterpriseKeywords = ExtractKeywords(doc, "TaxKeyword"),
-        //    AssociationIds = ExtractKeywords(doc, "Association"),
-        //    Summary = textContent != null ? GenerateSummary(textContent) : null,
-        //    ChunkSize = _chunkSizeTokens,
-        //    ChunkOverlap = _overlapTokens,
-        //    Chunks = ingestChunks 
-        //};
-
         // POST to your local AdamPY endpoint (update URL if needed)
         var json = JsonSerializer.Serialize(ingestRequest, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
         var content = new StringContent(json, Encoding.UTF8, "application/json");
@@ -520,129 +511,6 @@ public class SharePointClient : IDisposable
     }
 
 
-
-    /// <summary>
-    /// A stub that can be overridden to send a document to an external API.  By
-    /// default this method simply completes.  When building your own
-    /// integration you can replace the body of this method with logic to
-    /// transform <see cref="DocumentInfo"/> instances or post them to another
-    /// service.  If network or database calls are required the method can be
-    /// made asynchronous.
-    /// </summary>
-    /// <param name="doc">The document information to send.</param>
-    //protected virtual async Task SendToExternalApiAsync(DocumentInfo doc)
-    //{
-    //    string? textContent = null;
-    //    var extension = Path.GetExtension(doc.Name).ToLowerInvariant();
-
-    //    try
-    //    {
-    //        switch (extension)
-    //        {
-    //            case ".txt":
-    //            case ".md":
-    //                textContent = Encoding.UTF8.GetString(doc.Data);
-    //                break;
-    //            case ".pdf":
-    //                textContent = ExtractPdfText(doc.Data);
-    //                break;
-    //            case ".docx":
-    //                textContent = ExtractWordText(doc.Data);
-    //                break;
-    //            case ".xlsx":
-    //                textContent = ExtractExcelText(doc.Data);
-    //                break;
-    //        }
-    //    }
-    //    catch (Exception ex)
-    //    {
-    //        var msg = $"Failed to extract text for {doc.Name}: {ex.Message}";
-    //        ConsoleWindow.Error(msg);
-    //        ErrorLogger.Log(doc.Name, doc.Url, msg);
-    //    }
-
-    //    if (textContent != null)
-    //    {
-    //        textContent = CleanText(textContent);
-    //        if (string.IsNullOrWhiteSpace(textContent) || textContent.Length < 500)
-    //        {
-    //            ConsoleWindow.Info($"Skipping {doc.Name} due to insufficient content ({textContent?.Length ?? 0} chars).");
-    //            return;
-    //        }
-    //    }
-
-    //    var originalTitle = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : null;
-    //    var derivedTitle = DeriveTitle(originalTitle, textContent ?? string.Empty, doc.Name);
-    //    var categoryMeta = doc.Metadata.TryGetValue("Category", out var categoryValue) ? categoryValue?.ToString() : null;
-    //    var detectedCategory = DetectCategory(textContent ?? string.Empty) ?? categoryMeta ?? "All Documents";
-    //    var metaKeywords = ExtractKeywords(doc, "Keywords");
-    //    var contentKeywords = GenerateKeywords(textContent ?? string.Empty);
-    //    var allKeywords = metaKeywords.Concat(contentKeywords).Where(k => !string.IsNullOrWhiteSpace(k)).Distinct().ToList();
-
-    //    var payload = new RagIngestDocument
-    //    {
-    //        SpWebUrl = $"{_rootUrl}{doc.Url}",
-    //        SpItemId = doc.Metadata.TryGetValue("UniqueId", out var id) ? id?.ToString() : null,
-    //        ETag = doc.Metadata.TryGetValue("ETag", out var etag) ? etag?.ToString() : null,
-
-    //        Title = derivedTitle,
-    //        Org = doc.Metadata.TryGetValue("Org", out var org) ? org?.ToString() : null,
-    //        OrgCode = doc.Metadata.TryGetValue("Org_x0020_Code", out var orgCode) ? orgCode?.ToString() : null,
-    //        Category = detectedCategory,
-    //        DocCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var docCode) ? docCode?.ToString() : null,
-    //        Owner = doc.Metadata.TryGetValue("Owner0", out var owner) ? owner?.ToString() : null,
-    //        Version = doc.Metadata.TryGetValue("Version_", out var version) ? version?.ToString() : null,
-
-    //        RevisionDate = doc.Metadata.TryGetValue("Revision_x0020_Date", out var rev) ? rev?.ToString() : null,
-    //        LatestReviewDate = doc.Metadata.TryGetValue("Latest_x0020_Review_x0020_Date", out var latest) ? latest?.ToString() : null,
-    //        DocumentReviewDate = doc.Metadata.TryGetValue("aaaa", out var docReview) ? docReview?.ToString() : null,
-    //        ReviewApprovalDate = doc.Metadata.TryGetValue("Review_x0020_Approval_x0020_Date", out var approval) ? approval?.ToString() : null,
-
-    //        Keywords = allKeywords,
-    //        EnterpriseKeywords = ExtractKeywords(doc, "TaxKeyword"),
-    //        AssociationIds = ExtractKeywords(doc, "Association"),
-
-    //        FileName = doc.Name,
-    //        TextContent = textContent,
-    //        Summary = textContent != null ? GenerateSummary(textContent) : null,
-    //        ContentBytes = textContent is null ? Convert.ToBase64String(doc.Data) : null,
-
-    //    };
-
-    //    using var httpClient = new HttpClient
-    //    {
-    //        Timeout = TimeSpan.FromMinutes(30)
-    //    };
-    //    var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
-    //    var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-    //    try
-    //    {
-    //        var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
-
-    //        if (!response.IsSuccessStatusCode)
-    //        {
-    //            var errorString = await response.Content.ReadAsStringAsync();
-    //            ConsoleWindow.Error(errorString);
-    //            ErrorLogger.Log(doc.Name, doc.Url, errorString);
-    //        }
-    //        else
-    //        {
-    //            var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
-    //            if (resp != null)
-    //            {
-    //                ConsoleWindow.Success($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
-    //                if (!string.IsNullOrWhiteSpace(resp.Summary))
-    //                    ConsoleWindow.Info($"Summary:{resp.Summary}");
-    //            }
-    //        }
-    //    }
-    //    catch (Exception ex)
-    //    {
-    //        ConsoleWindow.Error(ex.ToString());
-    //        ErrorLogger.Log(doc.Name, doc.Url, ex.ToString());
-    //    }
-    //}
 
     private static string ExtractPdfText(byte[] data)
     {
