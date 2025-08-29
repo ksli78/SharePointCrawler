@@ -5,14 +5,12 @@ using System.Threading.Tasks;
 namespace SharePointCrawler;
 
 /// <summary>
-/// The entry point for the SharePoint crawler.  This console application
-/// accepts a SharePoint site URL, the server relative URL of the document
-/// library or folder to crawl and a set of Windows credentials.  It then
-/// instantiates a <see cref="SharePointClient"/> and iterates through all
-/// documents returned by the SharePoint REST API, printing basic
-/// information about each file to the console.  The credentials should
-/// correspond to a user account with permission to read from the target
-/// library.
+/// Entry point for the SharePoint crawler. This console application
+/// accepts the URL of a SharePoint site along with Windows credentials
+/// and automatically discovers all document libraries beneath the root
+/// site. Each library is then crawled and every document is processed.
+/// The credentials should correspond to a user account with permission
+/// to read from the target site.
 /// </summary>
 public static class Program
 {
@@ -26,27 +24,31 @@ public static class Program
         int chunkSizeTokens = 350;
         int overlapTokens = 80;
 
-        if (args.Length < 4)
+        if (args.Length < 3)
         {
-            Console.WriteLine("Usage: dotnet run <siteUrl> <libraryRelativeUrl> <username> <password> [domain]");
+            Console.WriteLine("Usage: dotnet run <siteUrl> <username> <password> [domain]");
             Console.WriteLine();
-            Console.WriteLine("siteUrl:           The base URL of your SharePoint site (e.g. https://server/sites/DevSite)");
-            Console.WriteLine("libraryRelativeUrl: Server relative URL of the document library or folder to crawl (e.g. /Shared Documents)");
-            Console.WriteLine("username:          The user name to authenticate with");
-            Console.WriteLine("password:          The password for the user");
+            Console.WriteLine("siteUrl:  The base URL of your SharePoint site (e.g. https://server/sites/DevSite)");
+            Console.WriteLine("username: The user name to authenticate with");
+            Console.WriteLine("password: The password for the user");
             Console.WriteLine("domain (optional): The Active Directory domain (on‑prem only)");
             return;
         }
 
         var siteUrl = args[0];
-        var libraryRelativeUrl = $"{siteUrl}/_api/web/GetFolderByServerRelativeUrl('{args[1]}')?$expand=Folders,Files";
-        var username = args[2];
-        var password = args[3];
-        var domain = args.Length > 4 ? args[4] : string.Empty;
+        var username = args[1];
+        var password = args[2];
 
+        var domain = string.Empty;
+        int optionalStart = 3;
+        if (args.Length > 3 && !args[3].StartsWith("--"))
+        {
+            domain = args[3];
+            optionalStart = 4;
+        }
 
         // Parse optional named arguments
-        foreach (var arg in args.Skip(4))
+        foreach (var arg in args.Skip(optionalStart))
         {
             if (arg.StartsWith("--mode=")) mode = arg.Split('=')[1];
             else if (arg.StartsWith("--titles-file=")) titlesFile = arg.Split('=')[1];
@@ -74,10 +76,14 @@ public static class Program
 
         ConsoleWindow.Initialize();
 
-        using var client = new SharePointClient(siteUrl, credential, allowedTitles,chunkSizeTokens,overlapTokens,collection);
-        await foreach (var doc in client.GetDocumentsAsync(libraryRelativeUrl))
+        using var client = new SharePointClient(siteUrl, credential, allowedTitles, chunkSizeTokens, overlapTokens, collection);
+        var libraries = await client.GetDocumentLibraryUrlsAsync();
+        foreach (var library in libraries)
         {
-            // Processing feedback is handled by SharePointClient via ConsoleWindow.
+            await foreach (var doc in client.GetDocumentsAsync(library))
+            {
+                // Processing feedback is handled by SharePointClient via ConsoleWindow.
+            }
         }
     }
 }

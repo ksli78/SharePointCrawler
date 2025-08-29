@@ -1,6 +1,6 @@
 # SharePoint Document Library Crawler
 
-This sample project demonstrates how to crawl a SharePoint on‑premises document library using the SharePoint REST API and .NET 8.  Given the server‑relative URL to a library or folder, the crawler traverses the hierarchy, downloads each file and exposes both its binary contents and metadata.  A stubbed method (`SendToExternalApiAsync`) is provided so that you can add your own logic to process or forward the retrieved documents to another API.
+This sample project demonstrates how to crawl a SharePoint on‑premises site using the SharePoint REST API and .NET 8.  Starting from the root site URL the crawler discovers all document libraries, traverses each hierarchy, downloads every file and exposes both its binary contents and metadata.  A stubbed method (`SendToExternalApiAsync`) is provided so that you can add your own logic to process or forward the retrieved documents to another API.
 
 ## Key REST API concepts
 
@@ -27,14 +27,11 @@ sharepoint-crawler/
 
 ### SharePointClient
 
-`SharePointClient` accepts a site URL and optional `NetworkCredential` in its constructor and exposes a single method:
+`SharePointClient` accepts a site URL and optional `NetworkCredential` in its constructor.  It can discover document libraries via `GetDocumentLibraryUrlsAsync` and crawl each one using `GetDocumentsAsync`.
 
-```csharp
-IAsyncEnumerable<DocumentInfo> GetDocumentsAsync(string libraryRelativeUrl)
-```
+Calling `GetDocumentLibraryUrlsAsync` returns the REST endpoints for each document library found under the site.  Passing one of these endpoints to `GetDocumentsAsync` yields an asynchronous stream of `DocumentInfo` objects representing every file found in that library and its subfolders.  Internally the client calls:
 
-Calling this method returns an asynchronous stream of `DocumentInfo` objects representing every file found in the target folder and its subfolders.  Internally the client calls:
-
+* `/_api/web/lists?$filter=BaseTemplate eq 101&$select=RootFolder/ServerRelativeUrl&$expand=RootFolder` to locate document libraries.
 * `/_api/web/GetFolderByServerRelativeUrl('<relativeUrl>')?$expand=Folders,Files` to enumerate both child folders and files【697898085085864†L82-L86】.
 * `/_api/web/GetFileByServerRelativeUrl('<fileRelativeUrl>')/$value` to download the bytes of each file【497258984103498†L142-L163】.
 
@@ -45,15 +42,14 @@ You can override the protected `SendToExternalApiAsync` method in a derived clas
 The console host expects the following command‑line arguments:
 
 ```text
-dotnet run <siteUrl> <libraryRelativeUrl> <username> <password> [domain]
+dotnet run <siteUrl> <username> <password> [domain]
 ```
 
 * `siteUrl` – The base URL of your SharePoint site (e.g. `https://server/sites/DevSite`).
-* `libraryRelativeUrl` – The server‑relative path of the library or folder to crawl (e.g. `/Shared Documents`).
-* `username`/`password` – Credentials for a user with read access to the library.
+* `username`/`password` – Credentials for a user with read access to the site.
 * `domain` – Optional Active Directory domain for on‑premises environments.
 
-The program constructs a `NetworkCredential` from the supplied account and iterates through all files returned by the crawler, printing basic information (name, URL and size).  Modify the loop to implement your own business logic.
+The program constructs a `NetworkCredential` from the supplied account, discovers all document libraries under the site and iterates through every file returned by the crawler.  Processing feedback is written to the console and a log file.
 
 ## Building and running
 
@@ -70,10 +66,10 @@ This repository does not include compiled binaries.  To run the crawler:
 4. Build and run the project, passing the required arguments:
 
    ```bash
-   dotnet run -- https://server/sites/DevSite "/Shared Documents" user password DOMAIN
+   dotnet run -- https://server/sites/DevSite user password DOMAIN
    ```
 
-Replace `https://server/sites/DevSite` and `/Shared Documents` with your site and library paths.  If you do not specify a domain the credential will assume a local account.
+Replace `https://server/sites/DevSite` with your site URL.  If you do not specify a domain the credential will assume a local account.
 
 ## Extending the crawler
 
