@@ -14,10 +14,14 @@ public static class ConsoleWindow
 {
     private const int DesiredWidth = 150;
     private const int PaneHeight = 10;
+    private const int HeaderHeight = 1;
     private static int Width => Math.Min(Console.BufferWidth, DesiredWidth);
 
     private static readonly List<(string Text, ConsoleColor Color)> _currentLines = new();
     private static readonly List<(string Text, ConsoleColor Color)> _previousLines = new();
+
+    private static string _currentFolder = string.Empty;
+    private static string _currentFile = string.Empty;
 
     private static int _processedCount;
     private static TimeSpan _totalTime = TimeSpan.Zero;
@@ -43,8 +47,9 @@ public static class ConsoleWindow
         }
 
         Console.Clear();
-        DrawPaneBorder(0);
-        DrawPaneBorder(PaneHeight);
+        DrawStatus();
+        DrawPaneBorder(HeaderHeight);
+        DrawPaneBorder(HeaderHeight + PaneHeight);
         DrawMetrics();
     }
 
@@ -54,7 +59,7 @@ public static class ConsoleWindow
     public static void StartDocument(DocumentInfo doc, DateTime start)
     {
         _currentLines.Clear();
-        RedrawPane(_currentLines, 0);
+        RedrawPane(_currentLines, HeaderHeight);
         Info($"Document: {doc.Name}");
         Info($"URL: {doc.Url}");
         Info($"Started: {start:T}");
@@ -97,7 +102,7 @@ public static class ConsoleWindow
         lines.Add((message, color));
         if (lines.Count > PaneHeight - 2)
             lines.RemoveAt(0);
-        var top = ReferenceEquals(lines, _currentLines) ? 0 : PaneHeight;
+        var top = HeaderHeight + (ReferenceEquals(lines, _currentLines) ? 0 : PaneHeight);
         RedrawPane(lines, top);
     }
 
@@ -139,8 +144,25 @@ public static class ConsoleWindow
     {
         var avgSeconds = _processedCount > 0 ? _totalTime.TotalSeconds / _processedCount : 0;
         var avgMinutes = avgSeconds / 60.0;
-        Console.SetCursorPosition(0, PaneHeight * 2);
+        Console.SetCursorPosition(0, HeaderHeight + PaneHeight * 2);
         var msg = $"Processed: {_processedCount}  Avg Time: {avgSeconds:F1}s ({avgMinutes:F1}m)";
         Console.Write(msg.PadRight(Width));
+    }
+
+    /// <summary>
+    /// Updates the status line with the current folder and file.
+    /// </summary>
+    public static void SetStatus(string folder, string file)
+    {
+        _currentFolder = folder;
+        _currentFile = file;
+        DrawStatus();
+    }
+
+    private static void DrawStatus()
+    {
+        Console.SetCursorPosition(0, 0);
+        var line = $"Folder: {_currentFolder}  File: {_currentFile}";
+        Console.Write(line.Length > Width ? line[..Width] : line.PadRight(Width));
     }
 }

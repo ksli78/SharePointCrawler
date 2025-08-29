@@ -39,15 +39,14 @@ public static class Program
         }
 
         var siteUrl = args[0];
-        var encodedLibraryPath = Uri.EscapeDataString(args[1]);
-        var libraryRelativeUrl = $"{siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encodedLibraryPath}')?$expand=Folders,Files";
+        var libraryRelativeUrl = args[1];
         var username = args[2];
         var password = args[3];
         var domain = args.Length > 4 ? args[4] : string.Empty;
 
 
         // Parse optional named arguments
-        foreach (var arg in args.Skip(4))
+        foreach (var arg in args.Skip(5))
         {
             if (arg.StartsWith("--mode=")) mode = arg.Split('=')[1];
             else if (arg.StartsWith("--titles-file=")) titlesFile = arg.Split('=')[1];

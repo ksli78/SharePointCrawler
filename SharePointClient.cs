@@ -130,164 +130,147 @@ public class SharePointClient : IDisposable
     }
 
     /// <summary>
-    /// Recursively enumerates all files within a document library.  The
-    /// <paramref name="libraryRelativeUrl"/> parameter must be the server
-    /// relative URL of the library or folder that you wish to crawl (for
-    /// example, <c>/Shared Documents</c> or
-    /// <c>/sites/DevSite/Documents/SubFolder</c>).  For each file discovered
-    /// the crawler yields a <see cref="DocumentInfo"/> instance containing the
-    /// file name, the server relative URL, a dictionary of metadata and the
-    /// binary data for the file.
+    /// Enumerates all files in the specified library.  The crawler first
+    /// retrieves a complete list of folders within the library and then
+    /// iterates over each folder to download its files.  Sub‑folders are
+    /// discovered during the initial enumeration so that the folder tree is
+    /// traversed depth‑first before any files are processed.
     /// </summary>
-    /// <param name="libraryRelativeUrl">Server relative URL of the document library or folder to crawl.</param>
+    /// <param name="libraryRelativeUrl">Server relative URL of the document library to crawl.</param>
     /// <returns>An asynchronous stream of <see cref="DocumentInfo"/> objects.</returns>
     public async IAsyncEnumerable<DocumentInfo> GetDocumentsAsync(string libraryRelativeUrl)
     {
         if (string.IsNullOrWhiteSpace(libraryRelativeUrl))
             throw new ArgumentException("Library relative URL must be provided", nameof(libraryRelativeUrl));
 
-        Log($"Enumerating folder {libraryRelativeUrl}");
-
-        // Ensure the relative URL starts with a forward slash.
-        var normalizedRelativeUrl = libraryRelativeUrl.StartsWith("/") ? libraryRelativeUrl.Substring(1) : libraryRelativeUrl;
-        normalizedRelativeUrl = normalizedRelativeUrl.EndsWith("?$expand=Folders,Files") ? normalizedRelativeUrl : $"{normalizedRelativeUrl}?$expand=Folders,Files";
-        // Build the REST endpoint.  We use $expand=Folders,Files so that
-        // information about both folders and files is returned in one call
-        //【697898085085864†L82-L86】.
-        var endpoint = normalizedRelativeUrl;
-        using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
-
-        if (response.IsSuccessStatusCode)
+        var folders = await GetAllFoldersAsync(libraryRelativeUrl).ConfigureAwait(false);
+        foreach (var folder in folders)
         {
+            ConsoleWindow.SetStatus(folder, string.Empty);
+            await foreach (var doc in ProcessFilesInFolderAsync(folder).ConfigureAwait(false))
+            {
+                yield return doc;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Recursively builds a list of all folder URLs beneath the supplied
+    /// library URL.
+    /// </summary>
+    private async Task<List<string>> GetAllFoldersAsync(string rootRelativeUrl)
+    {
+        var folders = new List<string>();
+        var stack = new Stack<string>();
+        stack.Push(rootRelativeUrl);
+
+        while (stack.Count > 0)
+        {
+            var current = stack.Pop();
+            folders.Add(current);
+
+            var encoded = Uri.EscapeDataString(current.TrimStart('/'));
+            var endpoint = $"{_siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encoded}')?$select=ServerRelativeUrl&$expand=Folders";
+            using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) continue;
 
             using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
             using var document = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
-            Log($"Retrieved metadata for folder {libraryRelativeUrl}");
-            // Detect whether the JSON payload is wrapped in a top‑level "d" property
-            // (verbose OData) or not (minimal metadata).  Some SharePoint
-            // configurations return the entity directly without a wrapper, as
-            // illustrated by the sample response provided in the user's report.
-            JsonElement root;
-            if (document.RootElement.TryGetProperty("d", out var dProperty))
+            JsonElement root = document.RootElement;
+            if (root.TryGetProperty("d", out var d)) root = d;
+
+            if (root.TryGetProperty("Folders", out var foldersElement))
             {
-                root = dProperty;
-            }
-            else
-            {
-                root = document.RootElement;
-            }
+                JsonElement folderArray;
+                if (foldersElement.ValueKind == JsonValueKind.Array)
+                    folderArray = foldersElement;
+                else if (foldersElement.TryGetProperty("results", out var folderResults))
+                    folderArray = folderResults;
+                else
+                    folderArray = default;
 
-                // Enumerate files first.  In verbose responses the Files collection
-                // contains a "results" property with the actual array.  In minimal
-                // metadata responses the Files property itself is the array.  We
-                // support both shapes.
-                if (root.TryGetProperty("Files", out var filesElement))
+                if (folderArray.ValueKind == JsonValueKind.Array)
                 {
-                    JsonElement fileArray;
-                    // When Files is already an array (minimal metadata) avoid calling
-                    // TryGetProperty on it since that will throw an exception.  Only
-                    // attempt to read the "results" property if the Files element is
-                    // an object.
-                    if (filesElement.ValueKind == JsonValueKind.Array)
+                    foreach (var folderElement in folderArray.EnumerateArray())
                     {
-                        fileArray = filesElement;
-                    }
-                    else if (filesElement.TryGetProperty("results", out var fileResults))
-                    {
-                        fileArray = fileResults;
-                    }
-                    else
-                    {
-                        fileArray = default;
-                    }
-
-                    if (fileArray.ValueKind == JsonValueKind.Array)
-                    {
-                        foreach (var fileElement in fileArray.EnumerateArray())
+                        if (folderElement.TryGetProperty("ServerRelativeUrl", out var serverUrl))
                         {
-                            DocumentInfo? docInfo = null;
-                            var start = DateTime.Now;
-                            try
-                            {
-                                docInfo = await FetchFileInfoAsync(fileElement).ConfigureAwait(false);
-                                if (_allowedTitles != null && !_allowedTitles.Contains(docInfo.Name) && !_allowedTitles.Contains(docInfo.Metadata.GetValueOrDefault("Title")?.ToString()))
-                                    continue;
-
-                                Log($"Processing file {docInfo.Name} at {docInfo.Url}");
-                                ConsoleWindow.StartDocument(docInfo, start);
-                                Log($"Sending {docInfo.Name} to external API");
-                                await SendToExternalApiAsync(docInfo).ConfigureAwait(false);
-                                var elapsed = DateTime.Now - start;
-                                Log($"Completed {docInfo.Name} in {elapsed.TotalSeconds:F1}s");
-                                ConsoleWindow.CompleteDocument(docInfo, elapsed, true);
-                            }
-                            catch (Exception ex)
-                            {
-                                var elapsed = DateTime.Now - start;
-                                ConsoleWindow.Error($"Error: {ex.Message} (elapsed {elapsed.TotalSeconds:F1}s)");
-                                if (docInfo != null)
-                                {
-                                    ErrorLogger.Log(docInfo.Name, docInfo.Url, ex.Message);
-                                    Log($"Error processing {docInfo.Name}: {ex.Message}");
-                                    ConsoleWindow.CompleteDocument(docInfo, elapsed, false, ex.Message);
-                                    docInfo = null;
-                                }
-                            }
-                            if (docInfo != null)
-                            {
-                                yield return docInfo;
-                            }
-                        }
-                    }
-                }
-
-                // Enumerate folders and recurse into each one.  As with Files, the
-                // Folders collection may either have a "results" property or be the
-                // array itself depending on the metadata level.
-                if (root.TryGetProperty("Folders", out var foldersElement))
-                {
-                    
-                    JsonElement folderArray;
-                    // As with Files, check if Folders is an array before reading the
-                    // "results" property to avoid invalid operations.
-                    if (foldersElement.ValueKind == JsonValueKind.Array)
-                    {
-                        folderArray = foldersElement;
-                    }
-                    else if (foldersElement.TryGetProperty("results", out var folderResults))
-                    {
-                        folderArray = folderResults;
-                    }
-                    else
-                    {
-                        folderArray = default;
-                    }
-
-                    if (folderArray.ValueKind == JsonValueKind.Array)
-                    {
-                        foreach (var folderElement in folderArray.EnumerateArray())
-                        {
-                            var folderRelativeUrl = folderElement.GetProperty("odata.id").GetString();
-                            if (string.IsNullOrWhiteSpace(folderRelativeUrl) && folderElement.TryGetProperty("ServerRelativeUrl", out var serverUrl))
-                            {
-                                var encoded = Uri.EscapeDataString(serverUrl.GetString() ?? string.Empty);
-                                folderRelativeUrl = $"{_siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encoded}')?$expand=Folders,Files";
-                            }
-                            if (!string.IsNullOrWhiteSpace(folderRelativeUrl))
-                            {
-                                Log($"Descending into folder {folderRelativeUrl}");
-                                await foreach (var nestedDoc in GetDocumentsAsync(folderRelativeUrl).ConfigureAwait(false))
-                                {
-                                    yield return nestedDoc;
-                                }
-                            }
+                            var url = serverUrl.GetString();
+                            if (!string.IsNullOrWhiteSpace(url))
+                                stack.Push(url);
                         }
                     }
                 }
             }
-        else
+        }
+
+        return folders;
+    }
+
+    /// <summary>
+    /// Retrieves all files within the specified folder.
+    /// </summary>
+    private async IAsyncEnumerable<DocumentInfo> ProcessFilesInFolderAsync(string folderRelativeUrl)
+    {
+        var encoded = Uri.EscapeDataString(folderRelativeUrl.TrimStart('/'));
+        var endpoint = $"{_siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encoded}')?$expand=Files";
+        using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
         {
             Log($"Request to {endpoint} failed with {response.StatusCode}");
+            yield break;
+        }
+
+        using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        using var document = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
+        JsonElement root = document.RootElement;
+        if (root.TryGetProperty("d", out var dProp)) root = dProp;
+
+        if (root.TryGetProperty("Files", out var filesElement))
+        {
+            JsonElement fileArray;
+            if (filesElement.ValueKind == JsonValueKind.Array)
+                fileArray = filesElement;
+            else if (filesElement.TryGetProperty("results", out var fileResults))
+                fileArray = fileResults;
+            else
+                fileArray = default;
+
+            if (fileArray.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var fileElement in fileArray.EnumerateArray())
+                {
+                    DocumentInfo? docInfo = null;
+                    var start = DateTime.Now;
+                    try
+                    {
+                        docInfo = await FetchFileInfoAsync(fileElement).ConfigureAwait(false);
+                        if (_allowedTitles != null && !_allowedTitles.Contains(docInfo.Name) && !_allowedTitles.Contains(docInfo.Metadata.GetValueOrDefault("Title")?.ToString()))
+                            continue;
+
+                        ConsoleWindow.SetStatus(folderRelativeUrl, docInfo.Name);
+                        ConsoleWindow.StartDocument(docInfo, start);
+                        await SendToExternalApiAsync(docInfo).ConfigureAwait(false);
+                        var elapsed = DateTime.Now - start;
+                        ConsoleWindow.CompleteDocument(docInfo, elapsed, true);
+                    }
+                    catch (Exception ex)
+                    {
+                        var elapsed = DateTime.Now - start;
+                        ConsoleWindow.Error($"Error: {ex.Message} (elapsed {elapsed.TotalSeconds:F1}s)");
+                        if (docInfo != null)
+                        {
+                            ErrorLogger.Log(docInfo.Name, docInfo.Url, ex.Message);
+                            ConsoleWindow.CompleteDocument(docInfo, elapsed, false, ex.Message);
+                        }
+                        docInfo = null;
+                    }
+                    if (docInfo != null)
+                    {
+                        yield return docInfo;
+                    }
+                }
+            }
         }
     }
 
