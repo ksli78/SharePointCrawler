@@ -212,7 +212,7 @@ public class SharePointClient : IDisposable
     /// </summary>
     private async IAsyncEnumerable<DocumentInfo> ProcessFilesInFolderAsync(string folderRelativeUrl)
     {
-        var encoded = Uri.EscapeDataString(folderRelativeUrl.TrimStart('/'));
+        var encoded = Uri.EscapeDataString(folderRelativeUrl);
         var endpoint = $"{_siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encoded}')?$expand=Files";
         using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
