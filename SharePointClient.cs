@@ -396,22 +396,44 @@ public class SharePointClient : IDisposable
         if (textContent != null)
         {
             textContent = CleanText(textContent);
+            // Only proceed if we have enough cleaned text.  The infer_metadata
+            // endpoint requires a reasonable length to produce a summary and
+            // keywords.  If the document is too short, skip ingestion.
             if (string.IsNullOrWhiteSpace(textContent) || textContent.Length < 500)
             {
                 ConsoleWindow.Info($"Skipping {doc.Name} due to insufficient content ({textContent?.Length ?? 0} chars).");
                 return;
             }
         }
+        // Call the infer_metadata API to obtain summary, category and keywords.
+        string? inferredSummary = null;
+        string? inferredCategory = null;
+        List<string>? inferredKeywords = null;
 
-
+        if (!string.IsNullOrWhiteSpace(textContent))
+        {
+            try
+            {
+                var meta = await InferMetadataAsync(textContent, doc).ConfigureAwait(false);
+                if (meta != null)
+                {
+                    inferredSummary = meta.Summary;
+                    inferredCategory = meta.Category;
+                    inferredKeywords = meta.Keywords;
+                }
+            }
+            catch (Exception ex)
+            {
+                ConsoleWindow.Error($"infer_metadata failed: {ex.Message}");
+            }
+        }
 
         var breadcrumbs = BuildBreadcrumbs(doc);
         var chunks = textContent != null
             ? SplitIntoChunks(textContent, _chunkSizeTokens, _overlapTokens)
             : new List<string> { null }; // fallback to whole file if no text
 
-       
-        List<IngestChunk> ingestChunks = new List<IngestChunk>();   
+        List<IngestChunk> ingestChunks = new List<IngestChunk>();
 
         foreach (var (chunkText, idx) in chunks.Select((c, i) => (c, i)))
         {
@@ -424,8 +446,7 @@ public class SharePointClient : IDisposable
                 Title = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : doc.Name,
                 FileName = doc.Name,
                 TextContent = chunkText,
-               
-                ContentBytes =  textContent is null ? Convert.ToBase64String(doc.Data) : null,
+                ContentBytes = textContent is null ? Convert.ToBase64String(doc.Data) : null,
                 Collection = _collection,
                 ChunkIndex = idx,
                 Breadcrumbs = breadcrumbs,
@@ -442,9 +463,13 @@ public class SharePointClient : IDisposable
                 ReviewApprovalDate = doc.Metadata.TryGetValue("Review_x0020_Approval_x0020_Date", out var approval) ? approval?.ToString() : null,
                 EnterpriseKeywords = ExtractKeywords(doc, "TaxKeyword"),
                 AssociationIds = ExtractKeywords(doc, "Association"),
-                Summary = textContent != null ? GenerateSummary(textContent) : null,
+                // Assign summary, category and keywords from infer_metadata if available,
+                // otherwise fallback to simple heuristics.
+                Summary = inferredSummary ?? (textContent != null ? GenerateSummary(textContent) : null),
+                Category = inferredCategory ?? DetectCategory(textContent ?? string.Empty),
+                Keywords = inferredKeywords != null && inferredKeywords.Count > 0 ? string.Join(",", inferredKeywords) : null,
             };
-          
+
             ingestChunks.Add(inChunk);
         }
 
@@ -661,5 +686,131 @@ public class SharePointClient : IDisposable
         _writer.Flush();
         _writer.Close();    
         _writer.Dispose();
+    }
+
+    /// <summary>
+    /// Calls the infer_metadata endpoint to obtain a summary, category and keyword list
+    /// for a given document.  If the call fails for any reason, null is returned
+    /// and callers should fall back to local heuristics.
+    /// </summary>
+    /// <param name="text">The cleaned text of the document.</param>
+    /// <param name="doc">The document info for metadata (title, doc code).</param>
+    /// <returns>An InferMetadataResult on success, otherwise null.</returns>
+    private async Task<InferMetadataResult?> InferMetadataAsync(string text, DocumentInfo doc)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+
+        // Build the request payload.  Include title and doc_code if available.
+        string? title = doc.Metadata.TryGetValue("Title", out var tVal) ? tVal?.ToString() : doc.Name;
+        string? docCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var dcVal) ? dcVal?.ToString() : null;
+        var payload = new
+        {
+            text = text,
+            title = title,
+            doc_code = docCode
+        };
+
+        var json = JsonSerializer.Serialize(payload);
+        using var httpClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromMinutes(2)
+        };
+        var content = new StringContent(json, Encoding.UTF8, "application/json");
+        try
+        {
+            var response = await httpClient.PostAsync("http://adam.amentumspacemissions.com:8000/infer_metadata", content).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                var err = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                ConsoleWindow.Error($"infer_metadata HTTP {response.StatusCode}: {err}");
+                return null;
+            }
+            var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+            var options = new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            };
+            var result = await JsonSerializer.DeserializeAsync<InferMetadataResult>(stream, options).ConfigureAwait(false);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            ConsoleWindow.Error($"infer_metadata exception: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Helper DTO for infer_metadata responses.
+    /// </summary>
+    private class InferMetadataResult
+    {
+        public string? Summary { get; set; }
+        public string? Category { get; set; }
+        public List<string> Keywords { get; set; } = new();
+        public Dictionary<string, JsonElement>? Debug { get; set; }
+    }
+
+    /// <summary>
+    /// Calls the infer_metadata endpoint to obtain a summary, category and keyword list
+    /// for a given document.  If the call fails for any reason, null is returned
+    /// and callers should fall back to local heuristics.
+    /// </summary>
+    /// <param name="text">The cleaned text of the document.</param>
+    /// <param name="doc">The document info for metadata (title, doc code).</param>
+    /// <returns>An InferMetadataResult on success, otherwise null.</returns>
+    private async Task<InferMetadataResult?> InferMetadataAsync(string text, DocumentInfo doc)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+
+        // Build the request payload.  Include title and doc_code if available.
+        string? title = doc.Metadata.TryGetValue("Title", out var tVal) ? tVal?.ToString() : doc.Name;
+        string? docCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var dcVal) ? dcVal?.ToString() : null;
+        var payload = new
+        {
+            text = text,
+            title = title,
+            doc_code = docCode
+        };
+
+        var json = JsonSerializer.Serialize(payload);
+        using var httpClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromMinutes(2)
+        };
+        var content = new StringContent(json, Encoding.UTF8, "application/json");
+        try
+        {
+            var response = await httpClient.PostAsync("http://adam.amentumspacemissions.com:8000/infer_metadata", content).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                var err = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                ConsoleWindow.Error($"infer_metadata HTTP {response.StatusCode}: {err}");
+                return null;
+            }
+            var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+            var options = new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            };
+            var result = await JsonSerializer.DeserializeAsync<InferMetadataResult>(stream, options).ConfigureAwait(false);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            ConsoleWindow.Error($"infer_metadata exception: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Helper DTO for infer_metadata responses.
+    /// </summary>
+    private class InferMetadataResult
+    {
+        public string? Summary { get; set; }
+        public string? Category { get; set; }
+        public List<string> Keywords { get; set; } = new();
+        public Dictionary<string, JsonElement>? Debug { get; set; }
     }
 }
