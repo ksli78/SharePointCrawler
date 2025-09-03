@@ -2,7 +2,7 @@
 
 This sample project demonstrates how to crawl a SharePoint on‑premises document library using the SharePoint REST API and .NET 8.  Given the server‑relative URL to a library or folder, the crawler traverses the hierarchy, downloads each file and exposes both its binary contents and metadata.  A stubbed method (`SendToExternalApiAsync`) is provided so that you can add your own logic to process or forward the retrieved documents to another API.
 
-The console UI reports progress for the crawl, including a progress bar that reflects the percentage of documents processed.
+The console UI reports crawl progress with a progress bar that reflects the percentage of documents processed and an estimated time to completion.
 
 ## Key REST API concepts
 
