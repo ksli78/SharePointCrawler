@@ -130,6 +130,25 @@ public class SharePointClient : IDisposable
     }
 
     /// <summary>
+    /// Calculates the total number of documents that will be processed for the specified library.
+    /// </summary>
+    /// <param name="libraryRelativeUrl">Server relative URL of the document library to inspect.</param>
+    /// <returns>The total count of documents that meet the filtering criteria.</returns>
+    public async Task<int> GetTotalDocumentCountAsync(string libraryRelativeUrl)
+    {
+        if (string.IsNullOrWhiteSpace(libraryRelativeUrl))
+            throw new ArgumentException("Library relative URL must be provided", nameof(libraryRelativeUrl));
+
+        var folders = await GetAllFoldersAsync(libraryRelativeUrl).ConfigureAwait(false);
+        int total = 0;
+        foreach (var folder in folders)
+        {
+            total += await CountFilesInFolderAsync(folder).ConfigureAwait(false);
+        }
+        return total;
+    }
+
+    /// <summary>
     /// Enumerates all files in the specified library.  The crawler first
     /// retrieves a complete list of folders within the library and then
     /// iterates over each folder to download its files.  Sub‑folders are
@@ -272,6 +291,58 @@ public class SharePointClient : IDisposable
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Counts the number of files within the specified folder that meet the filtering criteria.
+    /// </summary>
+    private async Task<int> CountFilesInFolderAsync(string folderRelativeUrl)
+    {
+        var encoded = Uri.EscapeDataString(folderRelativeUrl);
+        var endpoint = $"{_siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encoded}')?$expand=Files";
+        using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            Log($"Request to {endpoint} failed with {response.StatusCode}");
+            return 0;
+        }
+
+        using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        using var document = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
+        JsonElement root = document.RootElement;
+        if (root.TryGetProperty("d", out var dProp)) root = dProp;
+
+        int count = 0;
+        if (root.TryGetProperty("Files", out var filesElement))
+        {
+            JsonElement fileArray;
+            if (filesElement.ValueKind == JsonValueKind.Array)
+                fileArray = filesElement;
+            else if (filesElement.TryGetProperty("results", out var fileResults))
+                fileArray = fileResults;
+            else
+                fileArray = default;
+
+            if (fileArray.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var fileElement in fileArray.EnumerateArray())
+                {
+                    if (_allowedTitles != null)
+                    {
+                        string? name = null;
+                        if (fileElement.TryGetProperty("Name", out var nameProp))
+                            name = nameProp.GetString();
+                        string? title = null;
+                        if (fileElement.TryGetProperty("Title", out var titleProp))
+                            title = titleProp.GetString();
+                        if (!_allowedTitles.Contains(name ?? string.Empty) && !_allowedTitles.Contains(title ?? string.Empty))
+                            continue;
+                    }
+                    count++;
+                }
+            }
+        }
+        return count;
     }
 
     /// <summary>
@@ -681,7 +752,7 @@ public class SharePointClient : IDisposable
         _writer.Dispose();
     }
 
-   
+    
 
     /// <summary>
     /// Calls the infer_metadata endpoint to obtain a summary, category and keyword list

@@ -7,8 +7,9 @@ namespace SharePointCrawler;
 /// Renders a simple dashboard using two bordered console windows.  The top
 /// window displays information about the document currently being processed
 /// while the bottom window shows details about the previously processed
-/// document.  A running count of processed documents and the average
-/// processing time are shown beneath the windows.
+/// document.  A running count of processed documents, the average
+/// processing time, and an estimated time to completion are shown
+/// beneath the windows.
 /// </summary>
 public static class ConsoleWindow
 {
@@ -25,6 +26,7 @@ public static class ConsoleWindow
 
     private static int _processedCount;
     private static TimeSpan _totalTime = TimeSpan.Zero;
+    private static int _totalDocuments;
 
     /// <summary>
     /// Clears the console and draws the bordered windows.
@@ -79,6 +81,15 @@ public static class ConsoleWindow
 
         _processedCount++;
         _totalTime += elapsed;
+        DrawMetrics();
+    }
+
+    /// <summary>
+    /// Sets the total number of documents to be processed.
+    /// </summary>
+    public static void SetTotalDocuments(int total)
+    {
+        _totalDocuments = total;
         DrawMetrics();
     }
 
@@ -144,9 +155,19 @@ public static class ConsoleWindow
     {
         var avgSeconds = _processedCount > 0 ? _totalTime.TotalSeconds / _processedCount : 0;
         var avgMinutes = avgSeconds / 60.0;
+        var remainingDocs = Math.Max(0, _totalDocuments - _processedCount);
+        string eta = _processedCount > 0
+            ? TimeSpan.FromSeconds(avgSeconds * remainingDocs).ToString(@"hh\:mm\:ss")
+            : "N/A";
         Console.SetCursorPosition(0, HeaderHeight + PaneHeight * 2);
-        var msg = $"Processed: {_processedCount}  Avg Time: {avgSeconds:F1}s ({avgMinutes:F1}m)";
+        var msg = $"Processed: {_processedCount}/{_totalDocuments}  Avg Time: {avgSeconds:F1}s ({avgMinutes:F1}m)  ETA: {eta}";
         Console.Write(msg.PadRight(Width));
+        double progress = _totalDocuments > 0 ? (double)_processedCount / _totalDocuments : 0;
+        int barWidth = Math.Min(Width - 20, 40);
+        int filled = (int)(barWidth * progress);
+        var bar = "[" + new string('#', filled) + new string('-', barWidth - filled) + $"] {progress * 100:F0}%";
+        Console.SetCursorPosition(0, HeaderHeight + PaneHeight * 2 + 1);
+        Console.Write(bar.PadRight(Width));
     }
 
     /// <summary>
