@@ -232,7 +232,7 @@ public class SharePointClient : IDisposable
     private async IAsyncEnumerable<DocumentInfo> ProcessFilesInFolderAsync(string folderRelativeUrl)
     {
         var encoded = Uri.EscapeDataString(folderRelativeUrl);
-        var endpoint = $"{_siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encoded}')?$expand=Files";
+        var endpoint = $"{_siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encoded}')?$expand=Files,ListItemAllFields,Files/ListItemAllFields";
         using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
@@ -259,6 +259,9 @@ public class SharePointClient : IDisposable
             {
                 foreach (var fileElement in fileArray.EnumerateArray())
                 {
+                    if (!HasDocumentContentType(fileElement))
+                        continue;
+
                     DocumentInfo? docInfo = null;
                     var start = DateTime.Now;
                     try
@@ -299,7 +302,7 @@ public class SharePointClient : IDisposable
     private async Task<int> CountFilesInFolderAsync(string folderRelativeUrl)
     {
         var encoded = Uri.EscapeDataString(folderRelativeUrl);
-        var endpoint = $"{_siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encoded}')?$expand=Files";
+        var endpoint = $"{_siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encoded}')?$expand=Files,ListItemAllFields,Files/ListItemAllFields";
         using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
@@ -327,6 +330,9 @@ public class SharePointClient : IDisposable
             {
                 foreach (var fileElement in fileArray.EnumerateArray())
                 {
+                    if (!HasDocumentContentType(fileElement))
+                        continue;
+
                     if (_allowedTitles != null)
                     {
                         string? name = null;
@@ -343,6 +349,44 @@ public class SharePointClient : IDisposable
             }
         }
         return count;
+    }
+
+    private static bool HasDocumentContentType(JsonElement fileElement)
+    {
+        if (fileElement.ValueKind != JsonValueKind.Object)
+            return false;
+
+        if (fileElement.TryGetProperty("ListItemAllFields", out var listItem))
+        {
+            if (listItem.ValueKind == JsonValueKind.Object)
+            {
+                if (listItem.TryGetProperty("ContentType", out var ct))
+                {
+                    if (ct.ValueKind == JsonValueKind.String)
+                        return string.Equals(ct.GetString(), "Document", StringComparison.OrdinalIgnoreCase);
+                    if (ct.ValueKind == JsonValueKind.Object && ct.TryGetProperty("Name", out var name))
+                        return string.Equals(name.GetString(), "Document", StringComparison.OrdinalIgnoreCase);
+                }
+                if (listItem.TryGetProperty("ContentTypeId", out var ctId))
+                {
+                    var id = ctId.GetString();
+                    if (!string.IsNullOrEmpty(id) && id.StartsWith("0x0101", StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+            }
+        }
+
+        if (fileElement.TryGetProperty("ContentType", out var directCt) && directCt.ValueKind == JsonValueKind.String)
+            return string.Equals(directCt.GetString(), "Document", StringComparison.OrdinalIgnoreCase);
+
+        if (fileElement.TryGetProperty("ContentTypeId", out var directCtId))
+        {
+            var id = directCtId.GetString();
+            if (!string.IsNullOrEmpty(id) && id.StartsWith("0x0101", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>
