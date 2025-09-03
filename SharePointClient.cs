@@ -505,9 +505,7 @@ public class SharePointClient : IDisposable
                 var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
                 if (resp != null)
                 {
-                    ConsoleWindow.Success($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
-                    if (!string.IsNullOrWhiteSpace(resp.Summary))
-                        ConsoleWindow.Info($"Summary:{resp.Summary}");
+                    ConsoleWindow.Success($"Status:{resp.Success} - {resp.Chunks} Chunks");
                 }
             }
         }
@@ -665,16 +663,11 @@ public class SharePointClient : IDisposable
 
     private class IngestResponse
     {
-        [JsonPropertyName("ok")]
+        [JsonPropertyName("Success")]
         public bool Success { get; set; }
-        [JsonPropertyName("doc_id")]
-        public string? DocID { get; set; }
+        
         [JsonPropertyName("chunks")]
         public int Chunks { get; set; }
-        [JsonPropertyName("used")]
-        public string? IngestType { get; set; }
-        [JsonPropertyName("summary")]
-        public string? Summary { get; set; }
     }
 
     /// <summary>
@@ -688,68 +681,7 @@ public class SharePointClient : IDisposable
         _writer.Dispose();
     }
 
-    /// <summary>
-    /// Calls the infer_metadata endpoint to obtain a summary, category and keyword list
-    /// for a given document.  If the call fails for any reason, null is returned
-    /// and callers should fall back to local heuristics.
-    /// </summary>
-    /// <param name="text">The cleaned text of the document.</param>
-    /// <param name="doc">The document info for metadata (title, doc code).</param>
-    /// <returns>An InferMetadataResult on success, otherwise null.</returns>
-    private async Task<InferMetadataResult?> InferMetadataAsync(string text, DocumentInfo doc)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return null;
-
-        // Build the request payload.  Include title and doc_code if available.
-        string? title = doc.Metadata.TryGetValue("Title", out var tVal) ? tVal?.ToString() : doc.Name;
-        string? docCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var dcVal) ? dcVal?.ToString() : null;
-        var payload = new
-        {
-            text = text,
-            title = title,
-            doc_code = docCode
-        };
-
-        var json = JsonSerializer.Serialize(payload);
-        using var httpClient = new HttpClient
-        {
-            Timeout = TimeSpan.FromMinutes(2)
-        };
-        var content = new StringContent(json, Encoding.UTF8, "application/json");
-        try
-        {
-            var response = await httpClient.PostAsync("http://adam.amentumspacemissions.com:8000/infer_metadata", content).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode)
-            {
-                var err = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                ConsoleWindow.Error($"infer_metadata HTTP {response.StatusCode}: {err}");
-                return null;
-            }
-            var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
-            var options = new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            };
-            var result = await JsonSerializer.DeserializeAsync<InferMetadataResult>(stream, options).ConfigureAwait(false);
-            return result;
-        }
-        catch (Exception ex)
-        {
-            ConsoleWindow.Error($"infer_metadata exception: {ex.Message}");
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Helper DTO for infer_metadata responses.
-    /// </summary>
-    private class InferMetadataResult
-    {
-        public string? Summary { get; set; }
-        public string? Category { get; set; }
-        public List<string> Keywords { get; set; } = new();
-        public Dictionary<string, JsonElement>? Debug { get; set; }
-    }
+   
 
     /// <summary>
     /// Calls the infer_metadata endpoint to obtain a summary, category and keyword list
