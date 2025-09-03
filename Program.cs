@@ -75,6 +75,8 @@ public static class Program
         ConsoleWindow.Initialize();
 
         using var client = new SharePointClient(siteUrl, credential, allowedTitles,chunkSizeTokens,overlapTokens,collection);
+        var totalDocs = await client.GetTotalDocumentCountAsync(libraryRelativeUrl);
+        ConsoleWindow.SetTotalDocuments(totalDocs);
         await foreach (var doc in client.GetDocumentsAsync(libraryRelativeUrl))
         {
             // Processing feedback is handled by SharePointClient via ConsoleWindow.

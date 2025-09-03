@@ -25,6 +25,7 @@ public static class ConsoleWindow
 
     private static int _processedCount;
     private static TimeSpan _totalTime = TimeSpan.Zero;
+    private static int _totalDocuments;
 
     /// <summary>
     /// Clears the console and draws the bordered windows.
@@ -79,6 +80,15 @@ public static class ConsoleWindow
 
         _processedCount++;
         _totalTime += elapsed;
+        DrawMetrics();
+    }
+
+    /// <summary>
+    /// Sets the total number of documents to be processed.
+    /// </summary>
+    public static void SetTotalDocuments(int total)
+    {
+        _totalDocuments = total;
         DrawMetrics();
     }
 
@@ -145,8 +155,14 @@ public static class ConsoleWindow
         var avgSeconds = _processedCount > 0 ? _totalTime.TotalSeconds / _processedCount : 0;
         var avgMinutes = avgSeconds / 60.0;
         Console.SetCursorPosition(0, HeaderHeight + PaneHeight * 2);
-        var msg = $"Processed: {_processedCount}  Avg Time: {avgSeconds:F1}s ({avgMinutes:F1}m)";
+        var msg = $"Processed: {_processedCount}/{_totalDocuments}  Avg Time: {avgSeconds:F1}s ({avgMinutes:F1}m)";
         Console.Write(msg.PadRight(Width));
+        double progress = _totalDocuments > 0 ? (double)_processedCount / _totalDocuments : 0;
+        int barWidth = Math.Min(Width - 20, 40);
+        int filled = (int)(barWidth * progress);
+        var bar = "[" + new string('#', filled) + new string('-', barWidth - filled) + $"] {progress * 100:F0}%";
+        Console.SetCursorPosition(0, HeaderHeight + PaneHeight * 2 + 1);
+        Console.Write(bar.PadRight(Width));
     }
 
     /// <summary>

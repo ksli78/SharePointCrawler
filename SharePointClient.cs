@@ -130,6 +130,25 @@ public class SharePointClient : IDisposable
     }
 
     /// <summary>
+    /// Calculates the total number of documents that will be processed for the specified library.
+    /// </summary>
+    /// <param name="libraryRelativeUrl">Server relative URL of the document library to inspect.</param>
+    /// <returns>The total count of documents that meet the filtering criteria.</returns>
+    public async Task<int> GetTotalDocumentCountAsync(string libraryRelativeUrl)
+    {
+        if (string.IsNullOrWhiteSpace(libraryRelativeUrl))
+            throw new ArgumentException("Library relative URL must be provided", nameof(libraryRelativeUrl));
+
+        var folders = await GetAllFoldersAsync(libraryRelativeUrl).ConfigureAwait(false);
+        int total = 0;
+        foreach (var folder in folders)
+        {
+            total += await CountFilesInFolderAsync(folder).ConfigureAwait(false);
+        }
+        return total;
+    }
+
+    /// <summary>
     /// Enumerates all files in the specified library.  The crawler first
     /// retrieves a complete list of folders within the library and then
     /// iterates over each folder to download its files.  Sub‑folders are
@@ -272,6 +291,58 @@ public class SharePointClient : IDisposable
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Counts the number of files within the specified folder that meet the filtering criteria.
+    /// </summary>
+    private async Task<int> CountFilesInFolderAsync(string folderRelativeUrl)
+    {
+        var encoded = Uri.EscapeDataString(folderRelativeUrl);
+        var endpoint = $"{_siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encoded}')?$expand=Files";
+        using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            Log($"Request to {endpoint} failed with {response.StatusCode}");
+            return 0;
+        }
+
+        using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        using var document = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
+        JsonElement root = document.RootElement;
+        if (root.TryGetProperty("d", out var dProp)) root = dProp;
+
+        int count = 0;
+        if (root.TryGetProperty("Files", out var filesElement))
+        {
+            JsonElement fileArray;
+            if (filesElement.ValueKind == JsonValueKind.Array)
+                fileArray = filesElement;
+            else if (filesElement.TryGetProperty("results", out var fileResults))
+                fileArray = fileResults;
+            else
+                fileArray = default;
+
+            if (fileArray.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var fileElement in fileArray.EnumerateArray())
+                {
+                    if (_allowedTitles != null)
+                    {
+                        string? name = null;
+                        if (fileElement.TryGetProperty("Name", out var nameProp))
+                            name = nameProp.GetString();
+                        string? title = null;
+                        if (fileElement.TryGetProperty("Title", out var titleProp))
+                            title = titleProp.GetString();
+                        if (!_allowedTitles.Contains(name ?? string.Empty) && !_allowedTitles.Contains(title ?? string.Empty))
+                            continue;
+                    }
+                    count++;
+                }
+            }
+        }
+        return count;
     }
 
     /// <summary>
@@ -688,68 +759,7 @@ public class SharePointClient : IDisposable
         _writer.Dispose();
     }
 
-    /// <summary>
-    /// Calls the infer_metadata endpoint to obtain a summary, category and keyword list
-    /// for a given document.  If the call fails for any reason, null is returned
-    /// and callers should fall back to local heuristics.
-    /// </summary>
-    /// <param name="text">The cleaned text of the document.</param>
-    /// <param name="doc">The document info for metadata (title, doc code).</param>
-    /// <returns>An InferMetadataResult on success, otherwise null.</returns>
-    private async Task<InferMetadataResult?> InferMetadataAsync(string text, DocumentInfo doc)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return null;
-
-        // Build the request payload.  Include title and doc_code if available.
-        string? title = doc.Metadata.TryGetValue("Title", out var tVal) ? tVal?.ToString() : doc.Name;
-        string? docCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var dcVal) ? dcVal?.ToString() : null;
-        var payload = new
-        {
-            text = text,
-            title = title,
-            doc_code = docCode
-        };
-
-        var json = JsonSerializer.Serialize(payload);
-        using var httpClient = new HttpClient
-        {
-            Timeout = TimeSpan.FromMinutes(2)
-        };
-        var content = new StringContent(json, Encoding.UTF8, "application/json");
-        try
-        {
-            var response = await httpClient.PostAsync("http://adam.amentumspacemissions.com:8000/infer_metadata", content).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode)
-            {
-                var err = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                ConsoleWindow.Error($"infer_metadata HTTP {response.StatusCode}: {err}");
-                return null;
-            }
-            var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
-            var options = new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            };
-            var result = await JsonSerializer.DeserializeAsync<InferMetadataResult>(stream, options).ConfigureAwait(false);
-            return result;
-        }
-        catch (Exception ex)
-        {
-            ConsoleWindow.Error($"infer_metadata exception: {ex.Message}");
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Helper DTO for infer_metadata responses.
-    /// </summary>
-    private class InferMetadataResult
-    {
-        public string? Summary { get; set; }
-        public string? Category { get; set; }
-        public List<string> Keywords { get; set; } = new();
-        public Dictionary<string, JsonElement>? Debug { get; set; }
-    }
+    
 
     /// <summary>
     /// Calls the infer_metadata endpoint to obtain a summary, category and keyword list
