@@ -779,7 +779,7 @@ public class SharePointClient : IDisposable
         var json = JsonSerializer.Serialize(payload);
         using var httpClient = new HttpClient
         {
-            Timeout = TimeSpan.FromMinutes(2)
+            Timeout = TimeSpan.FromMinutes(30)
         };
         var content = new StringContent(json, Encoding.UTF8, "application/json");
         try
