@@ -360,18 +360,12 @@ public class SharePointClient : IDisposable
         {
             if (listItem.ValueKind == JsonValueKind.Object)
             {
-                if (listItem.TryGetProperty("ContentType", out var ct))
+                if (listItem.TryGetProperty("OData__x0068_wg8", out var ct))
                 {
                     if (ct.ValueKind == JsonValueKind.String)
                         return string.Equals(ct.GetString(), "Document", StringComparison.OrdinalIgnoreCase);
                     if (ct.ValueKind == JsonValueKind.Object && ct.TryGetProperty("Name", out var name))
                         return string.Equals(name.GetString(), "Document", StringComparison.OrdinalIgnoreCase);
-                }
-                if (listItem.TryGetProperty("ContentTypeId", out var ctId))
-                {
-                    var id = ctId.GetString();
-                    if (!string.IsNullOrEmpty(id) && id.StartsWith("0x0101", StringComparison.OrdinalIgnoreCase))
-                        return true;
                 }
             }
         }
