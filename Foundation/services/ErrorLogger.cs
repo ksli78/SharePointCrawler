@@ -27,15 +27,42 @@ public static class ErrorLogger
             // ignore logging failures
         }
     }
-    public static void AppedToRetryList(string docTitle)
+    public static void AppendToRetryList(string docTitle)
     {
         try
         {
-            File.AppendAllLines(LogPath, new[] { docTitle });
+            File.AppendAllLines(ErrorListFile, new[] { docTitle });
         }
         catch
         {
             // ignore logging failures
+        }
+    }
+
+    public static void ClearRetryList()
+    {
+        try
+        {
+            if (File.Exists(ErrorListFile))
+            {
+                File.Delete(ErrorListFile);
+            }
+        }
+        catch
+        {
+            // ignore failures
+        }
+    }
+
+    public static string[] ReadRetryList()
+    {
+        try
+        {
+            return File.Exists(ErrorListFile) ? File.ReadAllLines(ErrorListFile) : Array.Empty<string>();
+        }
+        catch
+        {
+            return Array.Empty<string>();
         }
     }
 }

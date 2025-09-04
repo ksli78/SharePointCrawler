@@ -75,6 +75,8 @@ public static class Program
         NetworkCredential credential = new(username, password, domain);
 
         ConsoleWindow.Initialize();
+        // Start fresh retry list for this run
+        ErrorLogger.ClearRetryList();
 
         using var client = new SharePointClient(siteUrl, credential, allowedTitles,chunkSizeTokens,overlapTokens,collection);
         var totalDocs = await client.GetTotalDocumentCountAsync(libraryRelativeUrl);
@@ -82,6 +84,58 @@ public static class Program
         await foreach (var doc in client.GetDocumentsAsync(libraryRelativeUrl))
         {
             // Processing feedback is handled by SharePointClient via ConsoleWindow.
+        }
+
+        // After crawl completes, offer to retry failed documents sent to Adam API
+        if (client.FailedDocuments.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("The following documents failed during Adam API ingestion:");
+            for (int i = 0; i < client.FailedDocuments.Count; i++)
+            {
+                var d = client.FailedDocuments[i];
+                Console.WriteLine($"  [{i + 1}] {d.Name}  ({d.Url})");
+            }
+            Console.Write("Would you like to retry any of these? [y/N]: ");
+            var retryAnswer = Console.ReadLine()?.Trim();
+            if (!string.IsNullOrEmpty(retryAnswer) && (retryAnswer.Equals("y", StringComparison.OrdinalIgnoreCase) || retryAnswer.Equals("yes", StringComparison.OrdinalIgnoreCase)))
+            {
+                Console.WriteLine("Enter item numbers to retry (comma-separated), or 'all' to retry all:");
+                Console.Write("> ");
+                var selection = Console.ReadLine()?.Trim();
+                List<int> indices = new();
+                if (string.IsNullOrWhiteSpace(selection) || selection.Equals("all", StringComparison.OrdinalIgnoreCase))
+                {
+                    indices = Enumerable.Range(1, client.FailedDocuments.Count).ToList();
+                }
+                else
+                {
+                    foreach (var part in selection.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    {
+                        if (int.TryParse(part, out var idx) && idx >= 1 && idx <= client.FailedDocuments.Count)
+                            indices.Add(idx);
+                    }
+                }
+
+                int successCount = 0;
+                int failCount = 0;
+                foreach (var idx in indices.Distinct())
+                {
+                    var doc = client.FailedDocuments[idx - 1];
+                    Console.WriteLine($"Retrying: {doc.Name}");
+                    var ok = await client.ResendDocumentAsync(doc);
+                    if (ok)
+                    {
+                        successCount++;
+                        client.FailedDocuments.Remove(doc);
+                    }
+                    else
+                    {
+                        failCount++;
+                    }
+                }
+                Console.WriteLine($"Retry complete. Succeeded: {successCount}, Failed: {failCount}");
+            }
         }
     }
 }

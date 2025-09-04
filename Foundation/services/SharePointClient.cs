@@ -54,6 +54,7 @@ public class SharePointClient : IDisposable
     private string _collection = "";
     private string logFile = "log.txt";
     private StreamWriter _writer;
+    public List<DocumentInfo> FailedDocuments { get; } = new();
 
 
 
@@ -263,9 +264,9 @@ public class SharePointClient : IDisposable
 
                         ConsoleWindow.SetStatus(folderRelativeUrl, docInfo.Name);
                         ConsoleWindow.StartDocument(docInfo, start);
-                        await SendToExternalApiAsync(docInfo).ConfigureAwait(false);
+                        var success = await SendToExternalApiAsync(docInfo).ConfigureAwait(false);
                         var elapsed = DateTime.Now - start;
-                        ConsoleWindow.CompleteDocument(docInfo, elapsed, true);
+                        ConsoleWindow.CompleteDocument(docInfo, elapsed, success);
                     }
                     catch (Exception ex)
                     {
@@ -436,14 +437,20 @@ public class SharePointClient : IDisposable
         return doc;
     }
 
-    protected async Task SendToExternalApiAsync(DocumentInfo doc)
+    public async Task<bool> ResendDocumentAsync(DocumentInfo doc)
+    {
+        // Wrapper to allow external callers to retry a document
+        return await SendToExternalApiAsync(doc).ConfigureAwait(false);
+    }
+
+    protected async Task<bool> SendToExternalApiAsync(DocumentInfo doc)
     {
         var extension = Path.GetExtension(doc.Name).ToLowerInvariant();
         
         if(extension != ".pdf")
         {
             ConsoleWindow.Error("Found unsuppported document, Only PDFs are handled at this time");
-            return;
+            return false;
         }
         
 
@@ -475,7 +482,9 @@ public class SharePointClient : IDisposable
                 var errorString = await response.Content.ReadAsStringAsync();
                 ConsoleWindow.Error(errorString);
                 ErrorLogger.Log(doc.Name, doc.Url, errorString);
-                ErrorLogger.AppedToRetryList(doc.Name); 
+                ErrorLogger.AppendToRetryList(doc.Name);
+                if (!FailedDocuments.Contains(doc)) FailedDocuments.Add(doc);
+                return false;
             }
             else
             {
@@ -484,13 +493,16 @@ public class SharePointClient : IDisposable
                 {
                     ConsoleWindow.Success($"Status:{resp.Status} - {resp.Chunks} Chunks");
                 }
+                return true;
             }
         }
         catch (Exception ex)
         {
             ConsoleWindow.Error(ex.ToString());
             ErrorLogger.Log(doc.Name, doc.Url, ex.ToString());
-            ErrorLogger.AppedToRetryList(doc.Name);
+            ErrorLogger.AppendToRetryList(doc.Name);
+            if (!FailedDocuments.Contains(doc)) FailedDocuments.Add(doc);
+            return false;
         }
     }
 
