@@ -21,8 +21,9 @@ using UglyToad.PdfPig.Tokens;
 using UglyToad.PdfPig.Fonts.TrueType.Tables;
 using SharePointCrawler.Foundation.Models;
 using DocumentFormat.OpenXml.Office2010.Excel;
+using SharePointCrawler.Foundation.utils;
 
-namespace SharePointCrawler;
+namespace SharePointCrawler.Foundation.services;
 
 /// <summary>
 /// Provides functionality to crawl a SharePoint document library using the
@@ -53,19 +54,9 @@ public class SharePointClient : IDisposable
     private string _collection = "";
     private string logFile = "log.txt";
     private StreamWriter _writer;
-   
-    
-    private static readonly Dictionary<Regex, string> CategoryKeywordMap = new()
-    {
-        [new Regex(@"\b(hr|human resources|employee)\b", RegexOptions.IgnoreCase)] = "HR",
-        [new Regex(@"\b(it|information technology|software|system)\b", RegexOptions.IgnoreCase)] = "IT",
-        [new Regex(@"\b(policy|procedure|guideline)\b", RegexOptions.IgnoreCase)] = "Policy",
-        [new Regex(@"\b(form|template)\b", RegexOptions.IgnoreCase)] = "Form"
-    };
-    private static readonly HashSet<string> StopWords = new(new[]
-    {
-        "the","and","for","with","that","this","from","have","will","their","are","was","were","has","had","but","not","you","your","about","into","can","shall","may","might","should","could","been","being","over","under","after","before","between","within","upon","without","including","include","such","each","any","other","more","most","some","than","too","very","one","two","three"
-    });
+
+
+
     /// <summary>
     /// Constructs a new client for interacting with a SharePoint site.  The
     /// <paramref name="siteUrl"/> parameter should point at the root of the
@@ -424,11 +415,11 @@ public class SharePointClient : IDisposable
         // Download the binary data for the file using the $value endpoint.  The
         // REST syntax for downloading a file is documented by Microsoft; you
         // call GetFileByServerRelativeUrl and append $value【497258984103498†L142-L163】.
-        if (!string.IsNullOrWhiteSpace(doc.Url) && doc.Url.EndsWith("aspx") != true )
+        if (!string.IsNullOrWhiteSpace(doc.Url) && doc.Url.EndsWith("aspx") != true)
         {
             var escapedUrl = doc.Url.Replace("'", "''");
             var fileEndpoint = $"{_siteUrl}/_api/web/GetFileByServerRelativeUrl('{escapedUrl}')/$value";
-            
+
             using var fileResponse = await _client.GetAsync(fileEndpoint).ConfigureAwait(false);
             if (fileResponse.IsSuccessStatusCode)
             {
@@ -444,155 +435,31 @@ public class SharePointClient : IDisposable
 
         return doc;
     }
-    private static IList<string> Tokenize(string text)
-    {
-        // naïve tokenizer: split on whitespace and punctuation
-        return text?
-            .Split(new[] { ' ', '\n', '\r', '\t', '.', ',', ';', ':', '-', '(', ')', '[', ']', '{', '}', '!', '?', '"' }, StringSplitOptions.RemoveEmptyEntries)
-            .ToList() ?? new List<string>();
-    }
-
-    private static List<string> SplitIntoChunks(string text, int chunkSize, int overlap)
-    {
-        var tokens = Tokenize(text);
-        var chunks = new List<string>();
-        for (int start = 0; start < tokens.Count; start += (chunkSize - overlap))
-        {
-            var window = tokens.Skip(start).Take(chunkSize).ToList();
-            if (window.Count == 0) break;
-            chunks.Add(string.Join(" ", window));
-            if (start + chunkSize >= tokens.Count) break;
-        }
-        return chunks;
-    }
-    private string BuildBreadcrumbs(DocumentInfo doc)
-    {
-        string? title = doc.Metadata.TryGetValue("Title", out var t) ? t?.ToString() : doc.Name;
-        return title ?? "";
-    }
 
     protected async Task SendToExternalApiAsync(DocumentInfo doc)
     {
-        string? textContent = null;
         var extension = Path.GetExtension(doc.Name).ToLowerInvariant();
-        try
+        
+        if(extension != ".pdf")
         {
-            switch (extension)
-            {
-                case ".txt":
-                case ".md":
-                    textContent = Encoding.UTF8.GetString(doc.Data);
-                    break;
-                case ".pdf":
-                    PdfToMarkdownConverter converter = new PdfToMarkdownConverter();
-                    textContent = converter.ConvertToMarkdown(doc.Data);
-                    break;
-                case ".docx":
-                    textContent = ExtractWordText(doc.Data);
-                    break;
-                case ".xlsx":
-                    textContent = ExtractExcelText(doc.Data);
-                    break;
-            }
+            ConsoleWindow.Error("Found unsuppported document, Only PDFs are handled at this time");
+            return;
         }
-        catch (Exception ex)
+        
+
+        IngestRequest request = new IngestRequest()
         {
-            var msg = $"Failed to extract text for {doc.Name}: {ex.Message}";
-            ConsoleWindow.Error(msg);
-            ErrorLogger.Log(doc.Name, doc.Url, msg);
-        }
-
-        if (textContent != null)
-        {
-            textContent = CleanText(textContent);
-            // Only proceed if we have enough cleaned text.  The infer_metadata
-            // endpoint requires a reasonable length to produce a summary and
-            // keywords.  If the document is too short, skip ingestion.
-            if (string.IsNullOrWhiteSpace(textContent) || textContent.Length < 500)
-            {
-                ConsoleWindow.Info($"Skipping {doc.Name} due to insufficient content ({textContent?.Length ?? 0} chars).");
-                return;
-            }
-        }
-        // Call the infer_metadata API to obtain summary, category and keywords.
-        string? inferredSummary = null;
-        string? inferredCategory = null;
-        List<string>? inferredKeywords = null;
-
-        if (!string.IsNullOrWhiteSpace(textContent))
-        {
-            try
-            {
-                var meta = await InferMetadataAsync(textContent, doc).ConfigureAwait(false);
-                if (meta != null)
-                {
-                    inferredSummary = meta.Summary;
-                    inferredCategory = meta.Category;
-                    inferredKeywords = meta.Keywords;
-                }
-            }
-            catch (Exception ex)
-            {
-                ConsoleWindow.Error($"infer_metadata failed: {ex.Message}");
-            }
-        }
-
-        var breadcrumbs = BuildBreadcrumbs(doc);
-        var chunks = textContent != null
-            ? SplitIntoChunks(textContent, _chunkSizeTokens, _overlapTokens)
-            : new List<string> { null }; // fallback to whole file if no text
-
-        List<IngestChunk> ingestChunks = new List<IngestChunk>();
-
-        foreach (var (chunkText, idx) in chunks.Select((c, i) => (c, i)))
-        {
-            var inChunk = new IngestChunk()
-            {
-                AllowedGroups = ["everyone"],
-                SpWebUrl = $"{_rootUrl}{doc.Url}",
-                SpItemId = doc.Metadata.TryGetValue("UniqueId", out var id) ? id?.ToString() : new Guid().ToString(),
-                ETag = doc.Metadata.TryGetValue("ETag", out var etag) ? etag?.ToString() : null,
-                Title = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : doc.Name,
-                FileName = doc.Name,
-                TextContent = chunkText,
-                ContentBytes = textContent is null ? Convert.ToBase64String(doc.Data) : null,
-                Collection = _collection,
-                ChunkIndex = idx,
-                Breadcrumbs = breadcrumbs,
-                ChunkSize = _chunkSizeTokens,
-                ChunkOverlap = _overlapTokens,
-                Org = doc.Metadata.TryGetValue("Org", out var org) ? org?.ToString() : null,
-                OrgCode = doc.Metadata.TryGetValue("Org_x0020_Code", out var orgCode) ? orgCode?.ToString() : null,
-                DocCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var docCode) ? docCode?.ToString() : null,
-                Owner = doc.Metadata.TryGetValue("Owner0", out var owner) ? owner?.ToString() : null,
-                Version = doc.Metadata.TryGetValue("Version_", out var version) ? version?.ToString() : null,
-                RevisionDate = doc.Metadata.TryGetValue("Revision_x0020_Date", out var rev) ? rev?.ToString() : null,
-                LatestReviewDate = doc.Metadata.TryGetValue("Latest_x0020_Review_x0020_Date", out var latest) ? latest?.ToString() : null,
-                DocumentReviewDate = doc.Metadata.TryGetValue("aaaa", out var docReview) ? docReview?.ToString() : null,
-                ReviewApprovalDate = doc.Metadata.TryGetValue("Review_x0020_Approval_x0020_Date", out var approval) ? approval?.ToString() : null,
-                EnterpriseKeywords = ExtractKeywords(doc, "TaxKeyword"),
-                AssociationIds = ExtractKeywords(doc, "Association"),
-                // Assign summary, category and keywords from infer_metadata if available,
-                // otherwise fallback to simple heuristics.
-                Summary = inferredSummary ?? (textContent != null ? GenerateSummary(textContent) : null),
-                Category = inferredCategory ?? DetectCategory(textContent ?? string.Empty),
-                Keywords = inferredKeywords != null && inferredKeywords.Count > 0 ? string.Join(",", inferredKeywords) : null,
-            };
-
-            ingestChunks.Add(inChunk);
-        }
-
-
-        var ingestRequest = new IngestRequest()
-        {
-            Chunks = ingestChunks,
+            ContentBytes = Convert.ToBase64String(doc.Data),
+            DocCode = doc.Metadata.TryGetValue("ETag", out var etag) ? etag?.ToString() : Guid.NewGuid().ToString(),
+            FileName = doc.Name,
+            SpWebUrl = $"{_rootUrl}{doc.Url}",
+            Title = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : doc.Name,
         };
 
 
         // POST to your local AdamPY endpoint (update URL if needed)
-        var json = JsonSerializer.Serialize(ingestRequest, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
+        var json = JsonSerializer.Serialize(request, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
         var content = new StringContent(json, Encoding.UTF8, "application/json");
-
 
         using var httpClient = new HttpClient
         {
@@ -601,20 +468,21 @@ public class SharePointClient : IDisposable
 
         try
         {
-            var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
+            var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8080/ingest", content);
 
             if (!response.IsSuccessStatusCode)
             {
                 var errorString = await response.Content.ReadAsStringAsync();
                 ConsoleWindow.Error(errorString);
                 ErrorLogger.Log(doc.Name, doc.Url, errorString);
+                ErrorLogger.AppedToRetryList(doc.Name); 
             }
             else
             {
                 var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
                 if (resp != null)
                 {
-                    ConsoleWindow.Success($"Status:{resp.Success} - {resp.Chunks} Chunks");
+                    ConsoleWindow.Success($"Status:{resp.Status} - {resp.Chunks} Chunks");
                 }
             }
         }
@@ -622,161 +490,8 @@ public class SharePointClient : IDisposable
         {
             ConsoleWindow.Error(ex.ToString());
             ErrorLogger.Log(doc.Name, doc.Url, ex.ToString());
+            ErrorLogger.AppedToRetryList(doc.Name);
         }
-    }
-
-
-
-    private static string ExtractPdfText(byte[] data)
-    {
-        using var ms = new MemoryStream(data);
-        using var document = PdfDocument.Open(ms);
-        var sb = new StringBuilder();
-        foreach (var page in document.GetPages())
-        {
-            sb.AppendLine(page.Text);
-        }
-        return sb.ToString();
-    }
-
-    private static string ExtractWordText(byte[] data)
-    {
-        using var ms = new MemoryStream(data);
-        using var doc = WordprocessingDocument.Open(ms, false);
-        var sb = new StringBuilder();
-        var body = doc.MainDocumentPart?.Document.Body;
-        if (body != null)
-        {
-            foreach (var text in body.Descendants<DocumentFormat.OpenXml.Wordprocessing.Text>())
-            {
-                sb.Append(text.Text);
-            }
-        }
-        return sb.ToString();
-    }
-
-    private static string ExtractExcelText(byte[] data)
-    {
-        using var ms = new MemoryStream(data);
-        using var document = SpreadsheetDocument.Open(ms, false);
-        var sb = new StringBuilder();
-        var wbPart = document.WorkbookPart;
-        if (wbPart?.Workbook.Sheets != null)
-        {
-            foreach (Sheet sheet in wbPart.Workbook.Sheets.OfType<Sheet>())
-            {
-                var wsPart = (WorksheetPart)wbPart.GetPartById(sheet.Id!);
-                foreach (var row in wsPart.Worksheet.Descendants<Row>())
-                {
-                    foreach (var cell in row.Descendants<Cell>())
-                    {
-                        var text = GetCellValue(cell, wbPart);
-                        if (!string.IsNullOrWhiteSpace(text))
-                            sb.Append(text).Append(' ');
-                    }
-                    sb.AppendLine();
-                }
-            }
-        }
-        return sb.ToString();
-    }
-
-    private static string GetCellValue(Cell cell, WorkbookPart wbPart)
-    {
-        var value = cell.CellValue?.InnerText ?? string.Empty;
-        if (cell.DataType?.Value == CellValues.SharedString)
-        {
-            var sstPart = wbPart.SharedStringTablePart;
-            if (sstPart != null)
-            {
-                return sstPart.SharedStringTable.ChildElements[int.Parse(value)].InnerText;
-            }
-        }
-        return value;
-    }
-
-    private static string CleanText(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return string.Empty;
-
-        var lines = text.Split('\n');
-        var lineCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        foreach (var line in lines)
-        {
-            var trimmed = line.Trim();
-            if (trimmed.Length == 0) continue;
-            lineCounts[trimmed] = lineCounts.TryGetValue(trimmed, out var c) ? c + 1 : 1;
-        }
-        var totalLines = lines.Length;
-        var sb = new StringBuilder();
-        var inToc = false;
-        foreach (var line in lines)
-        {
-            var trimmed = line.Trim();
-            if (trimmed.Length == 0) continue;
-            if (PageNumberRegex.IsMatch(trimmed) || SignatureRegex.IsMatch(trimmed)) continue;
-            if (lineCounts.TryGetValue(trimmed, out var count) && count > totalLines * 0.5) continue; // header/footer
-            if (!inToc && ToCRegex.IsMatch(trimmed)) { inToc = true; continue; }
-            if (inToc)
-            {
-                if (string.IsNullOrWhiteSpace(trimmed)) inToc = false;
-                continue;
-            }
-            sb.AppendLine(trimmed);
-        }
-
-        var cleaned = sb.ToString();
-        cleaned = Regex.Replace(cleaned, @"\s+", " ");
-        return cleaned.Trim();
-    }
-
-    private static string DeriveTitle(string? original, string text, string fileName)
-    {
-        var firstLine = text.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
-        if (string.IsNullOrWhiteSpace(original) || original.Equals(Path.GetFileNameWithoutExtension(fileName), StringComparison.OrdinalIgnoreCase))
-        {
-            return firstLine ?? original ?? fileName;
-        }
-        return original;
-    }
-
-    private static string? DetectCategory(string text)
-    {
-        foreach (var kvp in CategoryKeywordMap)
-        {
-            if (kvp.Key.IsMatch(text)) return kvp.Value;
-        }
-        return null;
-    }
-
-    private static List<string> GenerateKeywords(string text, int max = 10)
-    {
-        var tokens = Regex.Matches(text.ToLowerInvariant(), @"\b[a-z]{3,}\b").Select(m => m.Value)
-            .Where(t => !StopWords.Contains(t));
-        var freq = tokens.GroupBy(t => t).ToDictionary(g => g.Key, g => g.Count());
-        return freq.OrderByDescending(kv => kv.Value).Take(max).Select(kv => kv.Key).ToList();
-    }
-
-    private static string GenerateSummary(string text, int maxSentences = 3)
-    {
-        var sentences = Regex.Split(text, @"(?<=[\.\!\?])\s+").Where(s => !string.IsNullOrWhiteSpace(s)).ToArray();
-        return string.Join(" ", sentences.Take(maxSentences));
-    }
-    private List<string> ExtractKeywords(DocumentInfo doc, string field)
-    {
-        if (!doc.Metadata.TryGetValue(field, out var raw)) return new();
-        if (raw is string s && s.Contains(";")) return s.Split(';').Select(x => x.Trim()).ToList();
-        if (raw is IEnumerable<object> list) return list.Select(x => x?.ToString()).Where(x => !string.IsNullOrWhiteSpace(x)).ToList()!;
-        return new() { raw?.ToString()! };
-    }
-
-    private class IngestResponse
-    {
-        [JsonPropertyName("Success")]
-        public bool Success { get; set; }
-        
-        [JsonPropertyName("chunks")]
-        public int Chunks { get; set; }
     }
 
     /// <summary>
@@ -786,72 +501,7 @@ public class SharePointClient : IDisposable
     {
         _client.Dispose();
         _writer.Flush();
-        _writer.Close();    
+        _writer.Close();
         _writer.Dispose();
-    }
-
-    
-
-    /// <summary>
-    /// Calls the infer_metadata endpoint to obtain a summary, category and keyword list
-    /// for a given document.  If the call fails for any reason, null is returned
-    /// and callers should fall back to local heuristics.
-    /// </summary>
-    /// <param name="text">The cleaned text of the document.</param>
-    /// <param name="doc">The document info for metadata (title, doc code).</param>
-    /// <returns>An InferMetadataResult on success, otherwise null.</returns>
-    private async Task<InferMetadataResult?> InferMetadataAsync(string text, DocumentInfo doc)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return null;
-
-        // Build the request payload.  Include title and doc_code if available.
-        string? title = doc.Metadata.TryGetValue("Title", out var tVal) ? tVal?.ToString() : doc.Name;
-        string? docCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var dcVal) ? dcVal?.ToString() : null;
-        var payload = new
-        {
-            text = text,
-            title = title,
-            doc_code = docCode
-        };
-
-        var json = JsonSerializer.Serialize(payload);
-        using var httpClient = new HttpClient
-        {
-            Timeout = TimeSpan.FromMinutes(30)
-        };
-        var content = new StringContent(json, Encoding.UTF8, "application/json");
-        try
-        {
-            var response = await httpClient.PostAsync("http://adam.amentumspacemissions.com:8000/infer_metadata", content).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode)
-            {
-                var err = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                ConsoleWindow.Error($"infer_metadata HTTP {response.StatusCode}: {err}");
-                return null;
-            }
-            var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
-            var options = new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            };
-            var result = await JsonSerializer.DeserializeAsync<InferMetadataResult>(stream, options).ConfigureAwait(false);
-            return result;
-        }
-        catch (Exception ex)
-        {
-            ConsoleWindow.Error($"infer_metadata exception: {ex.Message}");
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Helper DTO for infer_metadata responses.
-    /// </summary>
-    private class InferMetadataResult
-    {
-        public string? Summary { get; set; }
-        public string? Category { get; set; }
-        public List<string> Keywords { get; set; } = new();
-        public Dictionary<string, JsonElement>? Debug { get; set; }
     }
 }

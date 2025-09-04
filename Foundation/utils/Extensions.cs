@@ -4,7 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace SharePointCrawler
+namespace SharePointCrawler.Foundation.utils
 {
     internal static class Extensions
     {

@@ -1,6 +1,8 @@
 using System;
 using System.Net;
 using System.Threading.Tasks;
+using SharePointCrawler.Foundation.services;
+using SharePointCrawler.Foundation.utils;
 
 namespace SharePointCrawler;
 

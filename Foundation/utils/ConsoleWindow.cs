@@ -1,7 +1,8 @@
 using System;
 using System.Collections.Generic;
+using SharePointCrawler.Foundation.Models;
 
-namespace SharePointCrawler;
+namespace SharePointCrawler.Foundation.utils;
 
 /// <summary>
 /// Renders a simple dashboard using two bordered console windows.  The top

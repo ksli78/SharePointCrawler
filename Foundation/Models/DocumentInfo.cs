@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace SharePointCrawler;
+namespace SharePointCrawler.Foundation.Models;
 
 /// <summary>
 /// Represents a document fetched from SharePoint.  Each document consists of a
