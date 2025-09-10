@@ -4,65 +4,47 @@ using System.Collections.Generic;
 namespace SharePointCrawler;
 
 /// <summary>
-/// Renders a simple dashboard using two bordered console windows.  The top
-/// window displays information about the document currently being processed
-/// while the bottom window shows details about the previously processed
-/// document.  A running count of processed documents and the average
-/// processing time are shown beneath the windows.
+/// Provides a simple dashboard abstraction used by <see cref="SharePointClient"/> to
+/// report progress to the <see cref="MainForm"/>.  This replaces the original
+/// console-based dashboard with one that updates Windows Forms controls.
 /// </summary>
 public static class ConsoleWindow
 {
-    private const int DesiredWidth = 150;
-    private const int PaneHeight = 10;
-    private static int Width => Math.Min(Console.BufferWidth, DesiredWidth);
-
     private static readonly List<(string Text, ConsoleColor Color)> _currentLines = new();
     private static readonly List<(string Text, ConsoleColor Color)> _previousLines = new();
-
     private static int _processedCount;
     private static TimeSpan _totalTime = TimeSpan.Zero;
+    private static MainForm? _form;
 
     /// <summary>
-    /// Clears the console and draws the bordered windows.
+    /// Initializes the dashboard and sets the total number of documents for the
+    /// progress bar.
     /// </summary>
-    public static void Initialize()
+    public static void Initialize(MainForm form, int totalDocuments)
     {
-        try
-        {
-            if (OperatingSystem.IsWindows())
-            {
-                if (Console.BufferWidth < DesiredWidth)
-                    Console.BufferWidth = DesiredWidth;
-                if (Console.WindowWidth < DesiredWidth)
-                    Console.WindowWidth = DesiredWidth;
-            }
-        }
-        catch
-        {
-            // Some environments don't allow resizing; ignore any errors.
-        }
-
-        Console.Clear();
-        DrawPaneBorder(0);
-        DrawPaneBorder(PaneHeight);
-        DrawMetrics();
+        _form = form;
+        _processedCount = 0;
+        _totalTime = TimeSpan.Zero;
+        _currentLines.Clear();
+        _previousLines.Clear();
+        _form.SetProgressMaximum(totalDocuments);
+        _form.UpdateMetrics(0, TimeSpan.Zero);
     }
 
     /// <summary>
-    /// Starts a new document in the current window.
+    /// Starts a new document in the current pane.
     /// </summary>
     public static void StartDocument(DocumentInfo doc, DateTime start)
     {
         _currentLines.Clear();
-        RedrawPane(_currentLines, 0);
         Info($"Document: {doc.Name}");
         Info($"URL: {doc.Url}");
         Info($"Started: {start:T}");
     }
 
     /// <summary>
-    /// Finalizes the current document, moves it to the previous window and
-    /// updates overall metrics.
+    /// Finalizes the current document, moves it to the previous pane and updates
+    /// metrics and progress.
     /// </summary>
     public static void CompleteDocument(DocumentInfo doc, TimeSpan elapsed, bool success = true, string? errorMessage = null)
     {
@@ -74,73 +56,31 @@ public static class ConsoleWindow
 
         _processedCount++;
         _totalTime += elapsed;
-        DrawMetrics();
+        _form?.UpdateMetrics(_processedCount, _totalTime);
+        _form?.UpdateProgress(_processedCount);
     }
 
     /// <summary>
-    /// Writes an informational message to the current window.
+    /// Writes an informational message to the current pane.
     /// </summary>
     public static void Info(string message) => AddLine(_currentLines, message, ConsoleColor.White);
 
     /// <summary>
-    /// Writes a success message to the current window.
+    /// Writes a success message to the current pane.
     /// </summary>
     public static void Success(string message) => AddLine(_currentLines, message, ConsoleColor.Green);
 
     /// <summary>
-    /// Writes an error message to the current window.
+    /// Writes an error message to the current pane.
     /// </summary>
     public static void Error(string message) => AddLine(_currentLines, message, ConsoleColor.Red);
 
     private static void AddLine(List<(string Text, ConsoleColor Color)> lines, string message, ConsoleColor color)
     {
         lines.Add((message, color));
-        if (lines.Count > PaneHeight - 2)
-            lines.RemoveAt(0);
-        var top = ReferenceEquals(lines, _currentLines) ? 0 : PaneHeight;
-        RedrawPane(lines, top);
-    }
-
-    private static void DrawPaneBorder(int top)
-    {
-        var horizontal = new string('-', Width - 2);
-        Console.SetCursorPosition(0, top);
-        Console.Write('+' + horizontal + '+');
-        for (int i = 1; i < PaneHeight - 1; i++)
-        {
-            Console.SetCursorPosition(0, top + i);
-            Console.Write('|' + new string(' ', Width - 2) + '|');
-        }
-        Console.SetCursorPosition(0, top + PaneHeight - 1);
-        Console.Write('+' + horizontal + '+');
-    }
-
-    private static void RedrawPane(List<(string Text, ConsoleColor Color)> lines, int top)
-    {
-        for (int i = 0; i < PaneHeight - 2; i++)
-        {
-            Console.SetCursorPosition(1, top + i + 1);
-            Console.Write(new string(' ', Width - 2));
-        }
-
-        int start = Math.Max(0, lines.Count - (PaneHeight - 2));
-        for (int i = 0; i < Math.Min(lines.Count, PaneHeight - 2); i++)
-        {
-            var line = lines[start + i];
-            Console.SetCursorPosition(1, top + i + 1);
-            Console.ForegroundColor = line.Color;
-            var text = line.Text.Length > Width - 2 ? line.Text[..(Width - 2)] : line.Text;
-            Console.Write(text.PadRight(Width - 2));
-            Console.ForegroundColor = ConsoleColor.White;
-        }
-    }
-
-    private static void DrawMetrics()
-    {
-        var avgSeconds = _processedCount > 0 ? _totalTime.TotalSeconds / _processedCount : 0;
-        var avgMinutes = avgSeconds / 60.0;
-        Console.SetCursorPosition(0, PaneHeight * 2);
-        var msg = $"Processed: {_processedCount}  Avg Time: {avgSeconds:F1}s ({avgMinutes:F1}m)";
-        Console.Write(msg.PadRight(Width));
+        if (ReferenceEquals(lines, _currentLines))
+            _form?.UpdateCurrentPane(lines);
+        else
+            _form?.UpdatePreviousPane(lines);
     }
 }

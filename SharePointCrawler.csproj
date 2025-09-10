@@ -1,8 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <!-- The project outputs an executable console application targeting .NET 8 -->
-    <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <!-- Configure as a Windows Forms application targeting .NET 8 on Windows -->
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <!-- Enable implicit using directives and nullable reference types -->
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>

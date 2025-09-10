@@ -120,11 +120,78 @@ public class SharePointClient : IDisposable
     /// Recursively enumerates all files within a document library.  The
     /// <paramref name="libraryRelativeUrl"/> parameter must be the server
     /// relative URL of the library or folder that you wish to crawl (for
-    /// example, <c>/Shared Documents</c> or
-    /// <c>/sites/DevSite/Documents/SubFolder</c>).  For each file discovered
-    /// the crawler yields a <see cref="DocumentInfo"/> instance containing the
-    /// file name, the server relative URL, a dictionary of metadata and the
-    /// binary data for the file.
+    /// <summary>
+    /// Recursively counts all documents under the specified library or folder.
+    /// This is used to initialize the progress bar in the UI before processing
+    /// begins.
+    /// </summary>
+    /// <param name="libraryRelativeUrl">Server relative URL of the document library or folder to crawl.</param>
+    /// <returns>The total number of documents found.</returns>
+    public async Task<int> CountDocumentsAsync(string libraryRelativeUrl)
+    {
+        if (string.IsNullOrWhiteSpace(libraryRelativeUrl))
+            throw new ArgumentException("Library relative URL must be provided", nameof(libraryRelativeUrl));
+
+        var normalizedRelativeUrl = libraryRelativeUrl.StartsWith("/") ? libraryRelativeUrl.Substring(1) : libraryRelativeUrl;
+        normalizedRelativeUrl = normalizedRelativeUrl.EndsWith("?$expand=Folders,Files") ? normalizedRelativeUrl : $"{normalizedRelativeUrl}?$expand=Folders,Files";
+        var endpoint = normalizedRelativeUrl;
+        using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+            return 0;
+
+        using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        using var document = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
+
+        JsonElement root;
+        if (document.RootElement.TryGetProperty("d", out var dProperty))
+            root = dProperty;
+        else
+            root = document.RootElement;
+
+        int count = 0;
+
+        if (root.TryGetProperty("Files", out var filesElement))
+        {
+            JsonElement fileArray;
+            if (filesElement.ValueKind == JsonValueKind.Array)
+                fileArray = filesElement;
+            else if (filesElement.TryGetProperty("results", out var fileResults))
+                fileArray = fileResults;
+            else
+                fileArray = default;
+
+            if (fileArray.ValueKind == JsonValueKind.Array)
+                count += fileArray.GetArrayLength();
+        }
+
+        if (root.TryGetProperty("Folders", out var foldersElement))
+        {
+            JsonElement folderArray;
+            if (foldersElement.ValueKind == JsonValueKind.Array)
+                folderArray = foldersElement;
+            else if (foldersElement.TryGetProperty("results", out var folderResults))
+                folderArray = folderResults;
+            else
+                folderArray = default;
+
+            if (folderArray.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var folderElement in folderArray.EnumerateArray())
+                {
+                    var folderRelativeUrl = folderElement.GetProperty("odata.id").GetString();
+                    if (!string.IsNullOrWhiteSpace(folderRelativeUrl))
+                        count += await CountDocumentsAsync(folderRelativeUrl).ConfigureAwait(false);
+                }
+            }
+        }
+
+        return count;
+    }
+
+    /// <summary>
+    /// Enumerates all documents under the specified library or folder.  For each
+    /// file discovered the crawler yields a <see cref="DocumentInfo"/> instance
+    /// containing the file name, URL, metadata and binary data.
     /// </summary>
     /// <param name="libraryRelativeUrl">Server relative URL of the document library or folder to crawl.</param>
     /// <returns>An asynchronous stream of <see cref="DocumentInfo"/> objects.</returns>
