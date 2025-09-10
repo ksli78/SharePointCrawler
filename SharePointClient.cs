@@ -19,6 +19,8 @@ using System.Text.Json.Serialization;
 using DocumentFormat.OpenXml.Drawing.Charts;
 using UglyToad.PdfPig.Tokens;
 using UglyToad.PdfPig.Fonts.TrueType.Tables;
+using SharePointCrawler.Foundation.Models;
+using DocumentFormat.OpenXml.Office2010.Excel;
 
 namespace SharePointCrawler;
 
@@ -49,7 +51,10 @@ public class SharePointClient : IDisposable
     private int _chunkSizeTokens = 0;
     private int _overlapTokens = 0;
     private string _collection = "";
-
+    private string logFile = "log.txt";
+    private StreamWriter _writer;
+   
+    
     private static readonly Dictionary<Regex, string> CategoryKeywordMap = new()
     {
         [new Regex(@"\b(hr|human resources|employee)\b", RegexOptions.IgnoreCase)] = "HR",
@@ -72,7 +77,7 @@ public class SharePointClient : IDisposable
     /// </summary>
     /// <param name="siteUrl">The base URL of the SharePoint site.</param>
     /// <param name="credential">Windows credentials for authentication.</param>
-    public SharePointClient(string siteUrl, NetworkCredential? credential, HashSet<string> allowedTitles, int chunkSizeTokens, int overlapTokens, string collection)
+    public SharePointClient(string siteUrl, NetworkCredential? credential, HashSet<string>? allowedTitles, int chunkSizeTokens, int overlapTokens, string collection)
     {
         if (string.IsNullOrWhiteSpace(siteUrl))
             throw new ArgumentException("Site URL must be provided", nameof(siteUrl));
@@ -114,161 +119,268 @@ public class SharePointClient : IDisposable
         _client.DefaultRequestHeaders.Add("Prefer", "odata=minimalmetadata");
 
         _client.DefaultRequestHeaders.Add("X-FORMS_BASED_AUTH_ACCEPTED", "f");
+
+        _writer = new StreamWriter(logFile, true);
+    }
+
+    private void Log(string message)
+    {
+        _writer.WriteLine($"{DateTime.Now:u} {message}");
+        _writer.Flush();
     }
 
     /// <summary>
-    /// Recursively enumerates all files within a document library.  The
-    /// <paramref name="libraryRelativeUrl"/> parameter must be the server
-    /// relative URL of the library or folder that you wish to crawl (for
-    /// example, <c>/Shared Documents</c> or
-    /// <c>/sites/DevSite/Documents/SubFolder</c>).  For each file discovered
-    /// the crawler yields a <see cref="DocumentInfo"/> instance containing the
-    /// file name, the server relative URL, a dictionary of metadata and the
-    /// binary data for the file.
+    /// Calculates the total number of documents that will be processed for the specified library.
     /// </summary>
-    /// <param name="libraryRelativeUrl">Server relative URL of the document library or folder to crawl.</param>
+    /// <param name="libraryRelativeUrl">Server relative URL of the document library to inspect.</param>
+    /// <returns>The total count of documents that meet the filtering criteria.</returns>
+    public async Task<int> GetTotalDocumentCountAsync(string libraryRelativeUrl)
+    {
+        if (string.IsNullOrWhiteSpace(libraryRelativeUrl))
+            throw new ArgumentException("Library relative URL must be provided", nameof(libraryRelativeUrl));
+
+        var folders = await GetAllFoldersAsync(libraryRelativeUrl).ConfigureAwait(false);
+        int total = 0;
+        foreach (var folder in folders)
+        {
+            total += await CountFilesInFolderAsync(folder).ConfigureAwait(false);
+        }
+        return total;
+    }
+
+    /// <summary>
+    /// Enumerates all files in the specified library.  The crawler first
+    /// retrieves a complete list of folders within the library and then
+    /// iterates over each folder to download its files.  Sub‑folders are
+    /// discovered during the initial enumeration so that the folder tree is
+    /// traversed depth‑first before any files are processed.
+    /// </summary>
+    /// <param name="libraryRelativeUrl">Server relative URL of the document library to crawl.</param>
     /// <returns>An asynchronous stream of <see cref="DocumentInfo"/> objects.</returns>
     public async IAsyncEnumerable<DocumentInfo> GetDocumentsAsync(string libraryRelativeUrl)
     {
         if (string.IsNullOrWhiteSpace(libraryRelativeUrl))
             throw new ArgumentException("Library relative URL must be provided", nameof(libraryRelativeUrl));
 
-        // Ensure the relative URL starts with a forward slash.
-        var normalizedRelativeUrl = libraryRelativeUrl.StartsWith("/") ? libraryRelativeUrl.Substring(1) : libraryRelativeUrl;
-        normalizedRelativeUrl = normalizedRelativeUrl.EndsWith("?$expand=Folders,Files") ? normalizedRelativeUrl : $"{normalizedRelativeUrl}?$expand=Folders,Files";
-        //normalizedRelativeUrl = UrlEncoder.Default.Encode(normalizedRelativeUrl);
-        // Build the REST endpoint.  We use $expand=Folders,Files so that
-        // information about both folders and files is returned in one call
-        //【697898085085864†L82-L86】.
-        //var escapedRelativeUrl = normalizedRelativeUrl.Replace("'", "''");
-        var endpoint = normalizedRelativeUrl;
-        try
+        var folders = await GetAllFoldersAsync(libraryRelativeUrl).ConfigureAwait(false);
+        foreach (var folder in folders)
         {
-            using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
-
-            if (response.IsSuccessStatusCode)
+            ConsoleWindow.SetStatus(folder, string.Empty);
+            await foreach (var doc in ProcessFilesInFolderAsync(folder).ConfigureAwait(false))
             {
+                yield return doc;
+            }
+        }
+    }
 
-                using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
-                using var document = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
+    /// <summary>
+    /// Recursively builds a list of all folder URLs beneath the supplied
+    /// library URL.
+    /// </summary>
+    private async Task<List<string>> GetAllFoldersAsync(string rootRelativeUrl)
+    {
+        var folders = new List<string>();
+        var stack = new Stack<string>();
+        stack.Push(rootRelativeUrl);
 
-                // Detect whether the JSON payload is wrapped in a top‑level "d" property
-                // (verbose OData) or not (minimal metadata).  Some SharePoint
-                // configurations return the entity directly without a wrapper, as
-                // illustrated by the sample response provided in the user's report.
-                JsonElement root;
-                if (document.RootElement.TryGetProperty("d", out var dProperty))
-                {
-                    root = dProperty;
-                }
+        while (stack.Count > 0)
+        {
+            var current = stack.Pop();
+            folders.Add(current);
+
+            var encoded = Uri.EscapeDataString(current.TrimStart('/'));
+            var endpoint = $"{_siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encoded}')?$select=ServerRelativeUrl&$expand=Folders";
+            using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) continue;
+
+            using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+            using var document = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
+            JsonElement root = document.RootElement;
+            if (root.TryGetProperty("d", out var d)) root = d;
+
+            if (root.TryGetProperty("Folders", out var foldersElement))
+            {
+                JsonElement folderArray;
+                if (foldersElement.ValueKind == JsonValueKind.Array)
+                    folderArray = foldersElement;
+                else if (foldersElement.TryGetProperty("results", out var folderResults))
+                    folderArray = folderResults;
                 else
-                {
-                    root = document.RootElement;
-                }
+                    folderArray = default;
 
-                // Enumerate files first.  In verbose responses the Files collection
-                // contains a "results" property with the actual array.  In minimal
-                // metadata responses the Files property itself is the array.  We
-                // support both shapes.
-                if (root.TryGetProperty("Files", out var filesElement))
+                if (folderArray.ValueKind == JsonValueKind.Array)
                 {
-                    JsonElement fileArray;
-                    // When Files is already an array (minimal metadata) avoid calling
-                    // TryGetProperty on it since that will throw an exception.  Only
-                    // attempt to read the "results" property if the Files element is
-                    // an object.
-                    if (filesElement.ValueKind == JsonValueKind.Array)
+                    foreach (var folderElement in folderArray.EnumerateArray())
                     {
-                        fileArray = filesElement;
-                    }
-                    else if (filesElement.TryGetProperty("results", out var fileResults))
-                    {
-                        fileArray = fileResults;
-                    }
-                    else
-                    {
-                        fileArray = default;
-                    }
-
-                    if (fileArray.ValueKind == JsonValueKind.Array)
-                    {
-                        foreach (var fileElement in fileArray.EnumerateArray())
+                        if (folderElement.TryGetProperty("ServerRelativeUrl", out var serverUrl))
                         {
-                            DocumentInfo? docInfo = null;
-                            var start = DateTime.Now;
-                            try
-                            {
-                                docInfo = await FetchFileInfoAsync(fileElement).ConfigureAwait(false);
-                                if (_allowedTitles != null && !_allowedTitles.Contains(docInfo.Name) &&
-
-                                    !_allowedTitles.Contains(docInfo.Metadata.GetValueOrDefault("Title")?.ToString()))
-                                    continue;
-
-
-                                ConsoleWindow.StartDocument(docInfo, start);
-                                await SendToExternalApiAsync(docInfo).ConfigureAwait(false);
-                                var elapsed = DateTime.Now - start;
-                                ConsoleWindow.CompleteDocument(docInfo, elapsed, true);
-                            }
-                            catch (Exception ex)
-                            {
-                                var elapsed = DateTime.Now - start;
-                                ConsoleWindow.Error($"Error: {ex.Message} (elapsed {elapsed.TotalSeconds:F1}s)");
-                                if (docInfo != null)
-                                {
-                                    ErrorLogger.Log(docInfo.Name, docInfo.Url, ex.Message);
-                                    ConsoleWindow.CompleteDocument(docInfo, elapsed, false, ex.Message);
-                                    docInfo = null;
-                                }
-                            }
-                            if (docInfo != null)
-                            {
-                                yield return docInfo;
-                            }
-                        }
-                    }
-                }
-
-                // Enumerate folders and recurse into each one.  As with Files, the
-                // Folders collection may either have a "results" property or be the
-                // array itself depending on the metadata level.
-                if (root.TryGetProperty("Folders", out var foldersElement))
-                {
-                    JsonElement folderArray;
-                    // As with Files, check if Folders is an array before reading the
-                    // "results" property to avoid invalid operations.
-                    if (foldersElement.ValueKind == JsonValueKind.Array)
-                    {
-                        folderArray = foldersElement;
-                    }
-                    else if (foldersElement.TryGetProperty("results", out var folderResults))
-                    {
-                        folderArray = folderResults;
-                    }
-                    else
-                    {
-                        folderArray = default;
-                    }
-
-                    if (folderArray.ValueKind == JsonValueKind.Array)
-                    {
-                        foreach (var folderElement in folderArray.EnumerateArray())
-                        {
-                            var folderRelativeUrl = folderElement.GetProperty("odata.id").GetString();
-                            if (!string.IsNullOrWhiteSpace(folderRelativeUrl))
-                            {
-                                await foreach (var nestedDoc in GetDocumentsAsync(folderRelativeUrl).ConfigureAwait(false))
-                                {
-                                    yield return nestedDoc;
-                                }
-                            }
+                            var url = serverUrl.GetString();
+                            if (!string.IsNullOrWhiteSpace(url))
+                                stack.Push(url);
                         }
                     }
                 }
             }
-
         }
-        finally { }
+
+        return folders;
+    }
+
+    /// <summary>
+    /// Retrieves all files within the specified folder.
+    /// </summary>
+    private async IAsyncEnumerable<DocumentInfo> ProcessFilesInFolderAsync(string folderRelativeUrl)
+    {
+        var encoded = Uri.EscapeDataString(folderRelativeUrl);
+        var endpoint = $"{_siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encoded}')?$expand=Files,ListItemAllFields,Files/ListItemAllFields";
+        using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            Log($"Request to {endpoint} failed with {response.StatusCode}");
+            yield break;
+        }
+
+        using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        using var document = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
+        JsonElement root = document.RootElement;
+        if (root.TryGetProperty("d", out var dProp)) root = dProp;
+
+        if (root.TryGetProperty("Files", out var filesElement))
+        {
+            JsonElement fileArray;
+            if (filesElement.ValueKind == JsonValueKind.Array)
+                fileArray = filesElement;
+            else if (filesElement.TryGetProperty("results", out var fileResults))
+                fileArray = fileResults;
+            else
+                fileArray = default;
+
+            if (fileArray.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var fileElement in fileArray.EnumerateArray())
+                {
+                    if (!HasDocumentContentType(fileElement))
+                        continue;
+
+                    DocumentInfo? docInfo = null;
+                    var start = DateTime.Now;
+                    try
+                    {
+                        docInfo = await FetchFileInfoAsync(fileElement).ConfigureAwait(false);
+                        if (_allowedTitles != null && !_allowedTitles.Contains(docInfo.Name) && !_allowedTitles.Contains(docInfo.Metadata.GetValueOrDefault("Title")?.ToString()))
+                            continue;
+
+                        ConsoleWindow.SetStatus(folderRelativeUrl, docInfo.Name);
+                        ConsoleWindow.StartDocument(docInfo, start);
+                        await SendToExternalApiAsync(docInfo).ConfigureAwait(false);
+                        var elapsed = DateTime.Now - start;
+                        ConsoleWindow.CompleteDocument(docInfo, elapsed, true);
+                    }
+                    catch (Exception ex)
+                    {
+                        var elapsed = DateTime.Now - start;
+                        ConsoleWindow.Error($"Error: {ex.Message} (elapsed {elapsed.TotalSeconds:F1}s)");
+                        if (docInfo != null)
+                        {
+                            ErrorLogger.Log(docInfo.Name, docInfo.Url, ex.Message);
+                            ConsoleWindow.CompleteDocument(docInfo, elapsed, false, ex.Message);
+                        }
+                        docInfo = null;
+                    }
+                    if (docInfo != null)
+                    {
+                        yield return docInfo;
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Counts the number of files within the specified folder that meet the filtering criteria.
+    /// </summary>
+    private async Task<int> CountFilesInFolderAsync(string folderRelativeUrl)
+    {
+        var encoded = Uri.EscapeDataString(folderRelativeUrl);
+        var endpoint = $"{_siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encoded}')?$expand=Files,ListItemAllFields,Files/ListItemAllFields";
+        using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            Log($"Request to {endpoint} failed with {response.StatusCode}");
+            return 0;
+        }
+
+        using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        using var document = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
+        JsonElement root = document.RootElement;
+        if (root.TryGetProperty("d", out var dProp)) root = dProp;
+
+        int count = 0;
+        if (root.TryGetProperty("Files", out var filesElement))
+        {
+            JsonElement fileArray;
+            if (filesElement.ValueKind == JsonValueKind.Array)
+                fileArray = filesElement;
+            else if (filesElement.TryGetProperty("results", out var fileResults))
+                fileArray = fileResults;
+            else
+                fileArray = default;
+
+            if (fileArray.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var fileElement in fileArray.EnumerateArray())
+                {
+                    if (!HasDocumentContentType(fileElement))
+                        continue;
+
+                    if (_allowedTitles != null)
+                    {
+                        string? name = null;
+                        if (fileElement.TryGetProperty("Name", out var nameProp))
+                            name = nameProp.GetString();
+                        string? title = null;
+                        if (fileElement.TryGetProperty("Title", out var titleProp))
+                            title = titleProp.GetString();
+                        if (!_allowedTitles.Contains(name ?? string.Empty) && !_allowedTitles.Contains(title ?? string.Empty))
+                            continue;
+                    }
+                    count++;
+                }
+            }
+        }
+        return count;
+    }
+
+    private static bool HasDocumentContentType(JsonElement fileElement)
+    {
+        if (fileElement.ValueKind != JsonValueKind.Object)
+            return false;
+
+        if (fileElement.TryGetProperty("ListItemAllFields", out var listItem))
+        {
+            if (listItem.ValueKind == JsonValueKind.Object)
+            {
+                if (listItem.TryGetProperty("OData__x0068_wg8", out var ct))
+                {
+                    if (ct.ValueKind == JsonValueKind.String)
+                        return string.Equals(ct.GetString(), "Document", StringComparison.OrdinalIgnoreCase);
+                    if (ct.ValueKind == JsonValueKind.Object && ct.TryGetProperty("Name", out var name))
+                        return string.Equals(name.GetString(), "Document", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+        }
+
+        if (fileElement.TryGetProperty("ContentType", out var directCt) && directCt.ValueKind == JsonValueKind.String)
+            return string.Equals(directCt.GetString(), "Document", StringComparison.OrdinalIgnoreCase);
+
+        if (fileElement.TryGetProperty("ContentTypeId", out var directCtId))
+        {
+            var id = directCtId.GetString();
+            if (!string.IsNullOrEmpty(id) && id.StartsWith("0x0101", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -312,10 +424,11 @@ public class SharePointClient : IDisposable
         // Download the binary data for the file using the $value endpoint.  The
         // REST syntax for downloading a file is documented by Microsoft; you
         // call GetFileByServerRelativeUrl and append $value【497258984103498†L142-L163】.
-        if (!string.IsNullOrWhiteSpace(doc.Url))
+        if (!string.IsNullOrWhiteSpace(doc.Url) && doc.Url.EndsWith("aspx") != true )
         {
             var escapedUrl = doc.Url.Replace("'", "''");
             var fileEndpoint = $"{_siteUrl}/_api/web/GetFileByServerRelativeUrl('{escapedUrl}')/$value";
+            
             using var fileResponse = await _client.GetAsync(fileEndpoint).ConfigureAwait(false);
             if (fileResponse.IsSuccessStatusCode)
             {
@@ -372,7 +485,7 @@ public class SharePointClient : IDisposable
                     break;
                 case ".pdf":
                     PdfToMarkdownConverter converter = new PdfToMarkdownConverter();
-                    textContent = converter.ConvertToMarkdown(doc.Data);// ExtractPdfText(doc.Data);
+                    textContent = converter.ConvertToMarkdown(doc.Data);
                     break;
                 case ".docx":
                     textContent = ExtractWordText(doc.Data);
@@ -392,217 +505,127 @@ public class SharePointClient : IDisposable
         if (textContent != null)
         {
             textContent = CleanText(textContent);
+            // Only proceed if we have enough cleaned text.  The infer_metadata
+            // endpoint requires a reasonable length to produce a summary and
+            // keywords.  If the document is too short, skip ingestion.
             if (string.IsNullOrWhiteSpace(textContent) || textContent.Length < 500)
             {
                 ConsoleWindow.Info($"Skipping {doc.Name} due to insufficient content ({textContent?.Length ?? 0} chars).");
                 return;
             }
         }
+        // Call the infer_metadata API to obtain summary, category and keywords.
+        string? inferredSummary = null;
+        string? inferredCategory = null;
+        List<string>? inferredKeywords = null;
 
-
+        if (!string.IsNullOrWhiteSpace(textContent))
+        {
+            try
+            {
+                var meta = await InferMetadataAsync(textContent, doc).ConfigureAwait(false);
+                if (meta != null)
+                {
+                    inferredSummary = meta.Summary;
+                    inferredCategory = meta.Category;
+                    inferredKeywords = meta.Keywords;
+                }
+            }
+            catch (Exception ex)
+            {
+                ConsoleWindow.Error($"infer_metadata failed: {ex.Message}");
+            }
+        }
 
         var breadcrumbs = BuildBreadcrumbs(doc);
         var chunks = textContent != null
             ? SplitIntoChunks(textContent, _chunkSizeTokens, _overlapTokens)
             : new List<string> { null }; // fallback to whole file if no text
 
+        List<IngestChunk> ingestChunks = new List<IngestChunk>();
+
         foreach (var (chunkText, idx) in chunks.Select((c, i) => (c, i)))
         {
-
-            var payload = new RagIngestDocument
+            var inChunk = new IngestChunk()
             {
+                AllowedGroups = ["everyone"],
                 SpWebUrl = $"{_rootUrl}{doc.Url}",
-                SpItemId = doc.Metadata.TryGetValue("UniqueId", out var id) ? id?.ToString() : null,
+                SpItemId = doc.Metadata.TryGetValue("UniqueId", out var id) ? id?.ToString() : new Guid().ToString(),
                 ETag = doc.Metadata.TryGetValue("ETag", out var etag) ? etag?.ToString() : null,
-
+                Title = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : doc.Name,
+                FileName = doc.Name,
+                TextContent = chunkText,
+                ContentBytes = textContent is null ? Convert.ToBase64String(doc.Data) : null,
+                Collection = _collection,
+                ChunkIndex = idx,
+                Breadcrumbs = breadcrumbs,
+                ChunkSize = _chunkSizeTokens,
+                ChunkOverlap = _overlapTokens,
                 Org = doc.Metadata.TryGetValue("Org", out var org) ? org?.ToString() : null,
                 OrgCode = doc.Metadata.TryGetValue("Org_x0020_Code", out var orgCode) ? orgCode?.ToString() : null,
-
                 DocCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var docCode) ? docCode?.ToString() : null,
                 Owner = doc.Metadata.TryGetValue("Owner0", out var owner) ? owner?.ToString() : null,
                 Version = doc.Metadata.TryGetValue("Version_", out var version) ? version?.ToString() : null,
-
                 RevisionDate = doc.Metadata.TryGetValue("Revision_x0020_Date", out var rev) ? rev?.ToString() : null,
                 LatestReviewDate = doc.Metadata.TryGetValue("Latest_x0020_Review_x0020_Date", out var latest) ? latest?.ToString() : null,
                 DocumentReviewDate = doc.Metadata.TryGetValue("aaaa", out var docReview) ? docReview?.ToString() : null,
                 ReviewApprovalDate = doc.Metadata.TryGetValue("Review_x0020_Approval_x0020_Date", out var approval) ? approval?.ToString() : null,
                 EnterpriseKeywords = ExtractKeywords(doc, "TaxKeyword"),
                 AssociationIds = ExtractKeywords(doc, "Association"),
-                TextContent = textContent,
-                Summary = textContent != null ? GenerateSummary(textContent) : null,
-                ContentBytes = textContent is null ? Convert.ToBase64String(doc.Data) : null,
-                FileName = doc.Name,
-                Title = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : doc.Name,
-                Collection = _collection, // new property: the collection to ingest into (e.g., docs_v2)
-                ChunkIndex = idx,
-                Breadcrumbs = breadcrumbs,
-                ChunkSize = _chunkSizeTokens,
-                ChunkOverlap = _overlapTokens
+                // Assign summary, category and keywords from infer_metadata if available,
+                // otherwise fallback to simple heuristics.
+                Summary = inferredSummary ?? (textContent != null ? GenerateSummary(textContent) : null),
+                Category = inferredCategory ?? DetectCategory(textContent ?? string.Empty),
+                Keywords = inferredKeywords != null && inferredKeywords.Count > 0 ? string.Join(",", inferredKeywords) : null,
             };
 
-            // POST to your local AdamPY endpoint (update URL if needed)
-            var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
+            ingestChunks.Add(inChunk);
+        }
 
 
-            using var httpClient = new HttpClient
+        var ingestRequest = new IngestRequest()
+        {
+            Chunks = ingestChunks,
+        };
+
+
+        // POST to your local AdamPY endpoint (update URL if needed)
+        var json = JsonSerializer.Serialize(ingestRequest, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
+        var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+
+        using var httpClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromMinutes(30)
+        };
+
+        try
+        {
+            var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
+
+            if (!response.IsSuccessStatusCode)
             {
-                Timeout = TimeSpan.FromMinutes(30)
-            };
-
-            try
+                var errorString = await response.Content.ReadAsStringAsync();
+                ConsoleWindow.Error(errorString);
+                ErrorLogger.Log(doc.Name, doc.Url, errorString);
+            }
+            else
             {
-                var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
-
-                if (!response.IsSuccessStatusCode)
+                var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
+                if (resp != null)
                 {
-                    var errorString = await response.Content.ReadAsStringAsync();
-                    ConsoleWindow.Error(errorString);
-                    ErrorLogger.Log(doc.Name, doc.Url, errorString);
-                }
-                else
-                {
-                    var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
-                    if (resp != null)
-                    {
-                        ConsoleWindow.Success($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
-                        if (!string.IsNullOrWhiteSpace(resp.Summary))
-                            ConsoleWindow.Info($"Summary:{resp.Summary}");
-                    }
+                    ConsoleWindow.Success($"Status:{resp.Success} - {resp.Chunks} Chunks");
                 }
             }
-            catch (Exception ex)
-            {
-                ConsoleWindow.Error(ex.ToString());
-                ErrorLogger.Log(doc.Name, doc.Url, ex.ToString());
-            }
+        }
+        catch (Exception ex)
+        {
+            ConsoleWindow.Error(ex.ToString());
+            ErrorLogger.Log(doc.Name, doc.Url, ex.ToString());
         }
     }
 
 
-
-    /// <summary>
-    /// A stub that can be overridden to send a document to an external API.  By
-    /// default this method simply completes.  When building your own
-    /// integration you can replace the body of this method with logic to
-    /// transform <see cref="DocumentInfo"/> instances or post them to another
-    /// service.  If network or database calls are required the method can be
-    /// made asynchronous.
-    /// </summary>
-    /// <param name="doc">The document information to send.</param>
-    //protected virtual async Task SendToExternalApiAsync(DocumentInfo doc)
-    //{
-    //    string? textContent = null;
-    //    var extension = Path.GetExtension(doc.Name).ToLowerInvariant();
-
-    //    try
-    //    {
-    //        switch (extension)
-    //        {
-    //            case ".txt":
-    //            case ".md":
-    //                textContent = Encoding.UTF8.GetString(doc.Data);
-    //                break;
-    //            case ".pdf":
-    //                textContent = ExtractPdfText(doc.Data);
-    //                break;
-    //            case ".docx":
-    //                textContent = ExtractWordText(doc.Data);
-    //                break;
-    //            case ".xlsx":
-    //                textContent = ExtractExcelText(doc.Data);
-    //                break;
-    //        }
-    //    }
-    //    catch (Exception ex)
-    //    {
-    //        var msg = $"Failed to extract text for {doc.Name}: {ex.Message}";
-    //        ConsoleWindow.Error(msg);
-    //        ErrorLogger.Log(doc.Name, doc.Url, msg);
-    //    }
-
-    //    if (textContent != null)
-    //    {
-    //        textContent = CleanText(textContent);
-    //        if (string.IsNullOrWhiteSpace(textContent) || textContent.Length < 500)
-    //        {
-    //            ConsoleWindow.Info($"Skipping {doc.Name} due to insufficient content ({textContent?.Length ?? 0} chars).");
-    //            return;
-    //        }
-    //    }
-
-    //    var originalTitle = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : null;
-    //    var derivedTitle = DeriveTitle(originalTitle, textContent ?? string.Empty, doc.Name);
-    //    var categoryMeta = doc.Metadata.TryGetValue("Category", out var categoryValue) ? categoryValue?.ToString() : null;
-    //    var detectedCategory = DetectCategory(textContent ?? string.Empty) ?? categoryMeta ?? "All Documents";
-    //    var metaKeywords = ExtractKeywords(doc, "Keywords");
-    //    var contentKeywords = GenerateKeywords(textContent ?? string.Empty);
-    //    var allKeywords = metaKeywords.Concat(contentKeywords).Where(k => !string.IsNullOrWhiteSpace(k)).Distinct().ToList();
-
-    //    var payload = new RagIngestDocument
-    //    {
-    //        SpWebUrl = $"{_rootUrl}{doc.Url}",
-    //        SpItemId = doc.Metadata.TryGetValue("UniqueId", out var id) ? id?.ToString() : null,
-    //        ETag = doc.Metadata.TryGetValue("ETag", out var etag) ? etag?.ToString() : null,
-
-    //        Title = derivedTitle,
-    //        Org = doc.Metadata.TryGetValue("Org", out var org) ? org?.ToString() : null,
-    //        OrgCode = doc.Metadata.TryGetValue("Org_x0020_Code", out var orgCode) ? orgCode?.ToString() : null,
-    //        Category = detectedCategory,
-    //        DocCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var docCode) ? docCode?.ToString() : null,
-    //        Owner = doc.Metadata.TryGetValue("Owner0", out var owner) ? owner?.ToString() : null,
-    //        Version = doc.Metadata.TryGetValue("Version_", out var version) ? version?.ToString() : null,
-
-    //        RevisionDate = doc.Metadata.TryGetValue("Revision_x0020_Date", out var rev) ? rev?.ToString() : null,
-    //        LatestReviewDate = doc.Metadata.TryGetValue("Latest_x0020_Review_x0020_Date", out var latest) ? latest?.ToString() : null,
-    //        DocumentReviewDate = doc.Metadata.TryGetValue("aaaa", out var docReview) ? docReview?.ToString() : null,
-    //        ReviewApprovalDate = doc.Metadata.TryGetValue("Review_x0020_Approval_x0020_Date", out var approval) ? approval?.ToString() : null,
-
-    //        Keywords = allKeywords,
-    //        EnterpriseKeywords = ExtractKeywords(doc, "TaxKeyword"),
-    //        AssociationIds = ExtractKeywords(doc, "Association"),
-
-    //        FileName = doc.Name,
-    //        TextContent = textContent,
-    //        Summary = textContent != null ? GenerateSummary(textContent) : null,
-    //        ContentBytes = textContent is null ? Convert.ToBase64String(doc.Data) : null,
-
-    //    };
-
-    //    using var httpClient = new HttpClient
-    //    {
-    //        Timeout = TimeSpan.FromMinutes(30)
-    //    };
-    //    var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
-    //    var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-    //    try
-    //    {
-    //        var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
-
-    //        if (!response.IsSuccessStatusCode)
-    //        {
-    //            var errorString = await response.Content.ReadAsStringAsync();
-    //            ConsoleWindow.Error(errorString);
-    //            ErrorLogger.Log(doc.Name, doc.Url, errorString);
-    //        }
-    //        else
-    //        {
-    //            var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
-    //            if (resp != null)
-    //            {
-    //                ConsoleWindow.Success($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
-    //                if (!string.IsNullOrWhiteSpace(resp.Summary))
-    //                    ConsoleWindow.Info($"Summary:{resp.Summary}");
-    //            }
-    //        }
-    //    }
-    //    catch (Exception ex)
-    //    {
-    //        ConsoleWindow.Error(ex.ToString());
-    //        ErrorLogger.Log(doc.Name, doc.Url, ex.ToString());
-    //    }
-    //}
 
     private static string ExtractPdfText(byte[] data)
     {
@@ -749,16 +772,11 @@ public class SharePointClient : IDisposable
 
     private class IngestResponse
     {
-        [JsonPropertyName("ok")]
+        [JsonPropertyName("Success")]
         public bool Success { get; set; }
-        [JsonPropertyName("doc_id")]
-        public string? DocID { get; set; }
+        
         [JsonPropertyName("chunks")]
         public int Chunks { get; set; }
-        [JsonPropertyName("used")]
-        public string? IngestType { get; set; }
-        [JsonPropertyName("summary")]
-        public string? Summary { get; set; }
     }
 
     /// <summary>
@@ -767,5 +785,73 @@ public class SharePointClient : IDisposable
     public void Dispose()
     {
         _client.Dispose();
+        _writer.Flush();
+        _writer.Close();    
+        _writer.Dispose();
+    }
+
+    
+
+    /// <summary>
+    /// Calls the infer_metadata endpoint to obtain a summary, category and keyword list
+    /// for a given document.  If the call fails for any reason, null is returned
+    /// and callers should fall back to local heuristics.
+    /// </summary>
+    /// <param name="text">The cleaned text of the document.</param>
+    /// <param name="doc">The document info for metadata (title, doc code).</param>
+    /// <returns>An InferMetadataResult on success, otherwise null.</returns>
+    private async Task<InferMetadataResult?> InferMetadataAsync(string text, DocumentInfo doc)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+
+        // Build the request payload.  Include title and doc_code if available.
+        string? title = doc.Metadata.TryGetValue("Title", out var tVal) ? tVal?.ToString() : doc.Name;
+        string? docCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var dcVal) ? dcVal?.ToString() : null;
+        var payload = new
+        {
+            text = text,
+            title = title,
+            doc_code = docCode
+        };
+
+        var json = JsonSerializer.Serialize(payload);
+        using var httpClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromMinutes(30)
+        };
+        var content = new StringContent(json, Encoding.UTF8, "application/json");
+        try
+        {
+            var response = await httpClient.PostAsync("http://adam.amentumspacemissions.com:8000/infer_metadata", content).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                var err = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                ConsoleWindow.Error($"infer_metadata HTTP {response.StatusCode}: {err}");
+                return null;
+            }
+            var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+            var options = new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            };
+            var result = await JsonSerializer.DeserializeAsync<InferMetadataResult>(stream, options).ConfigureAwait(false);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            ConsoleWindow.Error($"infer_metadata exception: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Helper DTO for infer_metadata responses.
+    /// </summary>
+    private class InferMetadataResult
+    {
+        public string? Summary { get; set; }
+        public string? Category { get; set; }
+        public List<string> Keywords { get; set; } = new();
+        public Dictionary<string, JsonElement>? Debug { get; set; }
     }
 }

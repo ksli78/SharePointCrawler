@@ -7,20 +7,26 @@ namespace SharePointCrawler;
 /// Renders a simple dashboard using two bordered console windows.  The top
 /// window displays information about the document currently being processed
 /// while the bottom window shows details about the previously processed
-/// document.  A running count of processed documents and the average
-/// processing time are shown beneath the windows.
+/// document.  A running count of processed documents, the average
+/// processing time, and an estimated time to completion are shown
+/// beneath the windows.
 /// </summary>
 public static class ConsoleWindow
 {
     private const int DesiredWidth = 150;
     private const int PaneHeight = 10;
+    private const int HeaderHeight = 1;
     private static int Width => Math.Min(Console.BufferWidth, DesiredWidth);
 
     private static readonly List<(string Text, ConsoleColor Color)> _currentLines = new();
     private static readonly List<(string Text, ConsoleColor Color)> _previousLines = new();
 
+    private static string _currentFolder = string.Empty;
+    private static string _currentFile = string.Empty;
+
     private static int _processedCount;
     private static TimeSpan _totalTime = TimeSpan.Zero;
+    private static int _totalDocuments;
 
     /// <summary>
     /// Clears the console and draws the bordered windows.
@@ -43,8 +49,9 @@ public static class ConsoleWindow
         }
 
         Console.Clear();
-        DrawPaneBorder(0);
-        DrawPaneBorder(PaneHeight);
+        DrawStatus();
+        DrawPaneBorder(HeaderHeight);
+        DrawPaneBorder(HeaderHeight + PaneHeight);
         DrawMetrics();
     }
 
@@ -54,7 +61,7 @@ public static class ConsoleWindow
     public static void StartDocument(DocumentInfo doc, DateTime start)
     {
         _currentLines.Clear();
-        RedrawPane(_currentLines, 0);
+        RedrawPane(_currentLines, HeaderHeight);
         Info($"Document: {doc.Name}");
         Info($"URL: {doc.Url}");
         Info($"Started: {start:T}");
@@ -78,6 +85,15 @@ public static class ConsoleWindow
     }
 
     /// <summary>
+    /// Sets the total number of documents to be processed.
+    /// </summary>
+    public static void SetTotalDocuments(int total)
+    {
+        _totalDocuments = total;
+        DrawMetrics();
+    }
+
+    /// <summary>
     /// Writes an informational message to the current window.
     /// </summary>
     public static void Info(string message) => AddLine(_currentLines, message, ConsoleColor.White);
@@ -97,7 +113,7 @@ public static class ConsoleWindow
         lines.Add((message, color));
         if (lines.Count > PaneHeight - 2)
             lines.RemoveAt(0);
-        var top = ReferenceEquals(lines, _currentLines) ? 0 : PaneHeight;
+        var top = HeaderHeight + (ReferenceEquals(lines, _currentLines) ? 0 : PaneHeight);
         RedrawPane(lines, top);
     }
 
@@ -139,8 +155,35 @@ public static class ConsoleWindow
     {
         var avgSeconds = _processedCount > 0 ? _totalTime.TotalSeconds / _processedCount : 0;
         var avgMinutes = avgSeconds / 60.0;
-        Console.SetCursorPosition(0, PaneHeight * 2);
-        var msg = $"Processed: {_processedCount}  Avg Time: {avgSeconds:F1}s ({avgMinutes:F1}m)";
+        var remainingDocs = Math.Max(0, _totalDocuments - _processedCount);
+        string eta = _processedCount > 0
+            ? TimeSpan.FromSeconds(avgSeconds * remainingDocs).ToString(@"hh\:mm\:ss")
+            : "N/A";
+        Console.SetCursorPosition(0, HeaderHeight + PaneHeight * 2);
+        var msg = $"Processed: {_processedCount}/{_totalDocuments}  Avg Time: {avgSeconds:F1}s ({avgMinutes:F1}m)  ETA: {eta}";
         Console.Write(msg.PadRight(Width));
+        double progress = _totalDocuments > 0 ? (double)_processedCount / _totalDocuments : 0;
+        int barWidth = Math.Min(Width - 20, 40);
+        int filled = (int)(barWidth * progress);
+        var bar = "[" + new string('#', filled) + new string('-', barWidth - filled) + $"] {progress * 100:F0}%";
+        Console.SetCursorPosition(0, HeaderHeight + PaneHeight * 2 + 1);
+        Console.Write(bar.PadRight(Width));
+    }
+
+    /// <summary>
+    /// Updates the status line with the current folder and file.
+    /// </summary>
+    public static void SetStatus(string folder, string file)
+    {
+        _currentFolder = folder;
+        _currentFile = file;
+        DrawStatus();
+    }
+
+    private static void DrawStatus()
+    {
+        Console.SetCursorPosition(0, 0);
+        var line = $"Folder: {_currentFolder}  File: {_currentFile}";
+        Console.Write(line.Length > Width ? line[..Width] : line.PadRight(Width));
     }
 }

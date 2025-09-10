@@ -2,9 +2,10 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 
-namespace SharePointCrawler
+namespace SharePointCrawler.Foundation.Models
 {
     public class RagIngestDocument
     {
@@ -30,6 +31,7 @@ namespace SharePointCrawler
         public List<string>? AssociationIds { get; set; }
 
         public string? Domain { get; set; } = "MS Documents";
+        [JsonPropertyName("allowed_groups")]
         public List<string>? AllowedGroups { get; set; } = new() { "AllEmployees" };
 
         public string? FileName { get; set; }
@@ -45,6 +47,6 @@ namespace SharePointCrawler
         public string Breadcrumbs { get; set; } = ""; 
         public int ChunkIndex { get; set; } = 0;
 
-
+        public List<IngestChunk> Chunks { get; set; }
     }
 }

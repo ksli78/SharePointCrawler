@@ -2,7 +2,7 @@
   "profiles": {
     "SharePointCrawler": {
       "commandName": "Project",
-      "commandLineArgs": "\"https://portal.amentumspacemissions.com/MS/docs\" \"Documents\" \"devslimans\" \"Kh@l3d$l1m@n14\" \"ASM\" --mode=titles --titles-file=docstoingest.txt --chunk-size-tokens=350 --chunk-overlap-tokens=80"
+      "commandLineArgs": "\"https://portal.amentumspacemissions.com/MS/docs\" \"Documents\" \"devslimans\" \"Kh@l3d$l1m@n14\" \"ASM\" chunk-size-tokens=350 --chunk-overlap-tokens=80 --collection=docs_v2"
     }
   }
 }
