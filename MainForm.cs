@@ -15,6 +15,28 @@ public partial class MainForm : Form
     {
         InitializeComponent();
         _btnStart.Click += BtnStart_Click;
+
+        var settings = UserSettings.Load();
+        _txtSiteUrl.Text = settings.SiteUrl ?? string.Empty;
+        _txtLibraryUrl.Text = settings.LibraryUrl ?? string.Empty;
+        _txtUsername.Text = settings.Username ?? string.Empty;
+        _txtPassword.Text = settings.Password ?? string.Empty;
+        _txtDomain.Text = settings.Domain ?? string.Empty;
+        _txtIngestUrl.Text = settings.IngestUrl ?? string.Empty;
+
+        FormClosing += (_, _) =>
+        {
+            var s = new UserSettings
+            {
+                SiteUrl = _txtSiteUrl.Text,
+                LibraryUrl = _txtLibraryUrl.Text,
+                Username = _txtUsername.Text,
+                Password = _txtPassword.Text,
+                Domain = _txtDomain.Text,
+                IngestUrl = _txtIngestUrl.Text
+            };
+            s.Save();
+        };
     }
 
     private async void BtnStart_Click(object? sender, EventArgs e)
