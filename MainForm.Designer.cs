@@ -6,164 +6,175 @@ namespace SharePointCrawler;
 
 partial class MainForm
 {
-        /// <summary>
-        /// Required designer variable.
-        /// </summary>
-        private System.ComponentModel.IContainer components = null;
+    /// <summary>
+    /// Required designer variable.
+    /// </summary>
+    private System.ComponentModel.IContainer components = null;
 
-        private TextBox _txtSiteUrl;
-        private TextBox _txtLibraryUrl;
-        private TextBox _txtUsername;
-        private TextBox _txtPassword;
-        private TextBox _txtDomain;
-        private TextBox _txtIngestUrl;
-        private Button _btnStart;
-        private RichTextBox _currentPane;
-        private RichTextBox _previousPane;
-        private Label _metricsLabel;
-        private ProgressBar _progressBar;
-        private TableLayoutPanel tableLayoutPanel1;
-        private Panel outputPanel;
-        private TableLayoutPanel outputLayout;
+    private TextBox _txtSiteUrl;
+    private TextBox _txtLibraryUrl;
+    private TextBox _txtUsername;
+    private TextBox _txtPassword;
+    private TextBox _txtDomain;
+    private TextBox _txtIngestUrl;
+    private Button _btnStart;
+    private RichTextBox _currentPane;
+    private RichTextBox _previousPane;
+    private ProgressBar _progressBar;
 
-        /// <summary>
-        /// Clean up any resources being used.
-        /// </summary>
-        /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
-        protected override void Dispose(bool disposing)
+    /// <summary>
+    /// Clean up any resources being used.
+    /// </summary>
+    /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && (components != null))
         {
-            if (disposing && (components != null))
-            {
-                components.Dispose();
-            }
-            base.Dispose(disposing);
+            components.Dispose();
         }
-
-        #region Windows Form Designer generated code
-
-        private void InitializeComponent()
-        {
-            this.components = new System.ComponentModel.Container();
-            this._txtSiteUrl = new System.Windows.Forms.TextBox();
-            this._txtLibraryUrl = new System.Windows.Forms.TextBox();
-            this._txtUsername = new System.Windows.Forms.TextBox();
-            this._txtPassword = new System.Windows.Forms.TextBox();
-            this._txtDomain = new System.Windows.Forms.TextBox();
-            this._txtIngestUrl = new System.Windows.Forms.TextBox();
-            this._btnStart = new System.Windows.Forms.Button();
-            this._currentPane = new System.Windows.Forms.RichTextBox();
-            this._previousPane = new System.Windows.Forms.RichTextBox();
-            this._metricsLabel = new System.Windows.Forms.Label();
-            this._progressBar = new System.Windows.Forms.ProgressBar();
-            this.tableLayoutPanel1 = new System.Windows.Forms.TableLayoutPanel();
-            this.outputPanel = new System.Windows.Forms.Panel();
-            this.outputLayout = new System.Windows.Forms.TableLayoutPanel();
-            this.SuspendLayout();
-            // 
-            // txt boxes
-            // 
-            this._txtSiteUrl.PlaceholderText = "Site URL";
-            this._txtSiteUrl.Width = 300;
-            this._txtLibraryUrl.PlaceholderText = "Library Relative URL";
-            this._txtLibraryUrl.Width = 300;
-            this._txtUsername.PlaceholderText = "Username";
-            this._txtUsername.Width = 150;
-            this._txtPassword.PlaceholderText = "Password";
-            this._txtPassword.UseSystemPasswordChar = true;
-            this._txtPassword.Width = 150;
-            this._txtDomain.PlaceholderText = "Domain";
-            this._txtDomain.Width = 150;
-            this._txtIngestUrl.PlaceholderText = "Ingest Endpoint URL";
-            this._txtIngestUrl.Width = 300;
-            // 
-            // _btnStart
-            // 
-            this._btnStart.Text = "Start";
-            this._btnStart.Width = 80;
-            // 
-            // _currentPane
-            // 
-            this._currentPane.ReadOnly = true;
-            this._currentPane.Width = 700;
-            this._currentPane.Height = 150;
-            this._currentPane.BackColor = Color.Black;
-            this._currentPane.ForeColor = Color.Lime;
-            this._currentPane.Font = new Font("Consolas", 9F, FontStyle.Regular, GraphicsUnit.Point);
-            // 
-            // _previousPane
-            // 
-            this._previousPane.ReadOnly = true;
-            this._previousPane.Width = 700;
-            this._previousPane.Height = 150;
-            this._previousPane.BackColor = Color.Black;
-            this._previousPane.ForeColor = Color.Lime;
-            this._previousPane.Font = new Font("Consolas", 9F, FontStyle.Regular, GraphicsUnit.Point);
-            // 
-            // _metricsLabel
-            // 
-            this._metricsLabel.AutoSize = true;
-            // 
-            // _progressBar
-            // 
-            this._progressBar.Width = 700;
-            // 
-            // tableLayoutPanel1
-            // 
-            this.tableLayoutPanel1.ColumnCount = 2;
-            this.tableLayoutPanel1.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            this.tableLayoutPanel1.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            this.tableLayoutPanel1.RowCount = 8;
-            this.tableLayoutPanel1.Dock = DockStyle.Fill;
-            // add controls
-            this.tableLayoutPanel1.Controls.Add(new Label { Text = "Site URL", AutoSize = true }, 0, 0);
-            this.tableLayoutPanel1.Controls.Add(this._txtSiteUrl, 1, 0);
-            this.tableLayoutPanel1.Controls.Add(new Label { Text = "Library URL", AutoSize = true }, 0, 1);
-            this.tableLayoutPanel1.Controls.Add(this._txtLibraryUrl, 1, 1);
-            this.tableLayoutPanel1.Controls.Add(new Label { Text = "Username", AutoSize = true }, 0, 2);
-            this.tableLayoutPanel1.Controls.Add(this._txtUsername, 1, 2);
-            this.tableLayoutPanel1.Controls.Add(new Label { Text = "Password", AutoSize = true }, 0, 3);
-            this.tableLayoutPanel1.Controls.Add(this._txtPassword, 1, 3);
-            this.tableLayoutPanel1.Controls.Add(new Label { Text = "Domain", AutoSize = true }, 0, 4);
-            this.tableLayoutPanel1.Controls.Add(this._txtDomain, 1, 4);
-            this.tableLayoutPanel1.Controls.Add(new Label { Text = "Ingest URL", AutoSize = true }, 0, 5);
-            this.tableLayoutPanel1.Controls.Add(this._txtIngestUrl, 1, 5);
-            this.tableLayoutPanel1.Controls.Add(this._btnStart, 1, 6);
-            // 
-            // outputPanel
-            // 
-            this.outputPanel.Dock = DockStyle.Fill;
-            this.tableLayoutPanel1.Controls.Add(this.outputPanel, 0, 7);
-            this.tableLayoutPanel1.SetColumnSpan(this.outputPanel, 2);
-            // 
-            // outputLayout
-            // 
-            this.outputLayout.ColumnCount = 1;
-            this.outputLayout.RowCount = 6;
-            this.outputLayout.Dock = DockStyle.Fill;
-            this.outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            this.outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            this.outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            this.outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            this.outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            this.outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            this.outputLayout.Controls.Add(new Label { Text = "Current Document", AutoSize = true, ForeColor = Color.Blue }, 0, 0);
-            this.outputLayout.Controls.Add(this._currentPane, 0, 1);
-            this.outputLayout.Controls.Add(new Label { Text = "Previous Document", AutoSize = true }, 0, 2);
-            this.outputLayout.Controls.Add(this._previousPane, 0, 3);
-            this.outputLayout.Controls.Add(this._progressBar, 0, 4);
-            this.outputLayout.Controls.Add(this._metricsLabel, 0, 5);
-            this.outputPanel.Controls.Add(this.outputLayout);
-            // 
-            // MainForm
-            // 
-            this.AutoScaleDimensions = new SizeF(7F, 15F);
-            this.AutoScaleMode = AutoScaleMode.Font;
-            this.ClientSize = new Size(750, 650);
-            this.Controls.Add(this.tableLayoutPanel1);
-            this.Text = "SharePoint Crawler";
-            this.ResumeLayout(false);
-        }
-
-        #endregion
+        base.Dispose(disposing);
     }
+
+    #region Windows Form Designer generated code
+
+    private void InitializeComponent()
+    {
+        _txtSiteUrl = new TextBox();
+        _txtLibraryUrl = new TextBox();
+        _txtUsername = new TextBox();
+        _txtPassword = new TextBox();
+        _txtDomain = new TextBox();
+        _txtIngestUrl = new TextBox();
+        _btnStart = new Button();
+        _currentPane = new RichTextBox();
+        _previousPane = new RichTextBox();
+        _progressBar = new ProgressBar();
+        _metricsLabel = new Label();
+        SuspendLayout();
+        // 
+        // _txtSiteUrl
+        // 
+        _txtSiteUrl.Location = new Point(12, 12);
+        _txtSiteUrl.Name = "_txtSiteUrl";
+        _txtSiteUrl.PlaceholderText = "Site URL";
+        _txtSiteUrl.Size = new Size(282, 23);
+        _txtSiteUrl.TabIndex = 1;
+        // 
+        // _txtLibraryUrl
+        // 
+        _txtLibraryUrl.Location = new Point(300, 12);
+        _txtLibraryUrl.Name = "_txtLibraryUrl";
+        _txtLibraryUrl.PlaceholderText = "Library Relative URL";
+        _txtLibraryUrl.Size = new Size(280, 23);
+        _txtLibraryUrl.TabIndex = 3;
+        // 
+        // _txtUsername
+        // 
+        _txtUsername.Location = new Point(114, 41);
+        _txtUsername.Name = "_txtUsername";
+        _txtUsername.PlaceholderText = "Username";
+        _txtUsername.Size = new Size(180, 23);
+        _txtUsername.TabIndex = 5;
+        // 
+        // _txtPassword
+        // 
+        _txtPassword.Location = new Point(300, 41);
+        _txtPassword.Name = "_txtPassword";
+        _txtPassword.PlaceholderText = "Password";
+        _txtPassword.Size = new Size(280, 23);
+        _txtPassword.TabIndex = 7;
+        _txtPassword.UseSystemPasswordChar = true;
+        // 
+        // _txtDomain
+        // 
+        _txtDomain.Location = new Point(12, 41);
+        _txtDomain.Name = "_txtDomain";
+        _txtDomain.PlaceholderText = "Domain";
+        _txtDomain.Size = new Size(96, 23);
+        _txtDomain.TabIndex = 9;
+        // 
+        // _txtIngestUrl
+        // 
+        _txtIngestUrl.Location = new Point(12, 70);
+        _txtIngestUrl.Name = "_txtIngestUrl";
+        _txtIngestUrl.PlaceholderText = "Ingest Endpoint URL";
+        _txtIngestUrl.Size = new Size(568, 23);
+        _txtIngestUrl.TabIndex = 11;
+        // 
+        // _btnStart
+        // 
+        _btnStart.Location = new Point(500, 435);
+        _btnStart.Name = "_btnStart";
+        _btnStart.Size = new Size(80, 23);
+        _btnStart.TabIndex = 12;
+        _btnStart.Text = "Start";
+        // 
+        // _currentPane
+        // 
+        _currentPane.BackColor = Color.Black;
+        _currentPane.Font = new Font("Consolas", 9F);
+        _currentPane.ForeColor = Color.Lime;
+        _currentPane.Location = new Point(12, 99);
+        _currentPane.Name = "_currentPane";
+        _currentPane.ReadOnly = true;
+        _currentPane.Size = new Size(568, 150);
+        _currentPane.TabIndex = 1;
+        _currentPane.Text = "";
+        // 
+        // _previousPane
+        // 
+        _previousPane.BackColor = Color.Black;
+        _previousPane.Font = new Font("Consolas", 9F);
+        _previousPane.ForeColor = Color.Lime;
+        _previousPane.Location = new Point(12, 255);
+        _previousPane.Name = "_previousPane";
+        _previousPane.ReadOnly = true;
+        _previousPane.Size = new Size(568, 150);
+        _previousPane.TabIndex = 3;
+        _previousPane.Text = "";
+        // 
+        // _progressBar
+        // 
+        _progressBar.Location = new Point(12, 435);
+        _progressBar.Name = "_progressBar";
+        _progressBar.Size = new Size(412, 23);
+        _progressBar.TabIndex = 4;
+        // 
+        // _metricsLabel
+        // 
+        _metricsLabel.BorderStyle = BorderStyle.FixedSingle;
+        _metricsLabel.Location = new Point(12, 409);
+        _metricsLabel.Name = "_metricsLabel";
+        _metricsLabel.Size = new Size(568, 23);
+        _metricsLabel.TabIndex = 13;
+        // 
+        // MainForm
+        // 
+        AutoScaleDimensions = new SizeF(7F, 15F);
+        AutoScaleMode = AutoScaleMode.Font;
+        ClientSize = new Size(593, 471);
+        Controls.Add(_metricsLabel);
+        Controls.Add(_currentPane);
+        Controls.Add(_progressBar);
+        Controls.Add(_previousPane);
+        Controls.Add(_txtSiteUrl);
+        Controls.Add(_txtLibraryUrl);
+        Controls.Add(_btnStart);
+        Controls.Add(_txtUsername);
+        Controls.Add(_txtPassword);
+        Controls.Add(_txtDomain);
+        Controls.Add(_txtIngestUrl);
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        Name = "MainForm";
+        Text = "SharePoint Crawler";
+        ResumeLayout(false);
+        PerformLayout();
+    }
+
+    #endregion
+
+    private Label _metricsLabel;
 }
+
