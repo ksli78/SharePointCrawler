@@ -27,7 +27,7 @@ public partial class MainForm : Form
     {
         Text = "SharePoint Crawler";
         Width = 750;
-        Height = 600;
+        Height = 650;
         var table = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -61,7 +61,7 @@ public partial class MainForm : Form
         outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        outputLayout.Controls.Add(new Label { Text = "Current Document", AutoSize = true }, 0, 0);
+        outputLayout.Controls.Add(new Label { Text = "Current Document", AutoSize = true, ForeColor= Color.Blue }, 0, 0);
         outputLayout.Controls.Add(_currentPane, 0, 1);
         outputLayout.Controls.Add(new Label { Text = "Previous Document", AutoSize = true }, 0, 2);
         outputLayout.Controls.Add(_previousPane, 0, 3);
