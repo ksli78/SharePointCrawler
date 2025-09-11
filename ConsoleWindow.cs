@@ -63,7 +63,7 @@ public static class ConsoleWindow
     /// <summary>
     /// Writes an informational message to the current pane.
     /// </summary>
-    public static void Info(string message) => AddLine(_currentLines, message, ConsoleColor.White);
+    public static void Info(string message) => AddLine(_currentLines, message, ConsoleColor.Green);
 
     /// <summary>
     /// Writes a success message to the current pane.
