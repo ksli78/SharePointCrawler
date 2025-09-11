@@ -41,6 +41,7 @@ public class SharePointClient : IDisposable
     private readonly HttpClient _client;
     private readonly string _siteUrl;
     private string _rootUrl = string.Empty;
+    private readonly string _ingestUrl;
     private static readonly Regex PageNumberRegex = new(@"^(page\s*\d+(\s*of\s*\d+)?)|^\d+$", RegexOptions.IgnoreCase);
     private static readonly Regex SignatureRegex = new(@"^(signature|signed|approved by|prepared by).*", RegexOptions.IgnoreCase);
     private static readonly Regex ToCRegex = new(@"table of contents", RegexOptions.IgnoreCase);
@@ -72,7 +73,7 @@ public class SharePointClient : IDisposable
     /// </summary>
     /// <param name="siteUrl">The base URL of the SharePoint site.</param>
     /// <param name="credential">Windows credentials for authentication.</param>
-    public SharePointClient(string siteUrl, NetworkCredential? credential, HashSet<string> allowedTitles, int chunkSizeTokens, int overlapTokens, string collection)
+    public SharePointClient(string siteUrl, NetworkCredential? credential, HashSet<string> allowedTitles, int chunkSizeTokens, int overlapTokens, string collection, string ingestUrl)
     {
         if (string.IsNullOrWhiteSpace(siteUrl))
             throw new ArgumentException("Site URL must be provided", nameof(siteUrl));
@@ -82,6 +83,7 @@ public class SharePointClient : IDisposable
         _chunkSizeTokens = chunkSizeTokens;
         _overlapTokens = overlapTokens;
         _collection = collection;
+        _ingestUrl = ingestUrl;
 
 
         // Trim trailing slashes from the site URL so we don't end up with
@@ -414,12 +416,7 @@ public class SharePointClient : IDisposable
         var sourceUrl = $"{_rootUrl}{doc.Url}"; // or a fixed URL if desired
 
         using var httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
-
-#if DEBUG
-        var url = "http://10.0.0.54:8000/ingest/upload";
-#else
-    var url = "http://adam.amentumspacemissions.com:8000/ingest/upload";
-#endif
+        var url = _ingestUrl;
 
         // Build multipart/form-data
         using var form = new MultipartFormDataContent();
