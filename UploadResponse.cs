@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace SharePointCrawler.Foundation.Models
+namespace SharePointCrawler
 {
     /// <summary>
     /// Response model for the /upload-document API endpoint.

@@ -19,8 +19,6 @@ using System.Text.Json.Serialization;
 using DocumentFormat.OpenXml.Drawing.Charts;
 using UglyToad.PdfPig.Tokens;
 using UglyToad.PdfPig.Fonts.TrueType.Tables;
-using SharePointCrawler.Foundation.Models;
-using DocumentFormat.OpenXml.Office2010.Excel;
 
 namespace SharePointCrawler;
 
@@ -47,14 +45,11 @@ public class SharePointClient : IDisposable
     private static readonly Regex SignatureRegex = new(@"^(signature|signed|approved by|prepared by).*", RegexOptions.IgnoreCase);
     private static readonly Regex ToCRegex = new(@"table of contents", RegexOptions.IgnoreCase);
 
-    private HashSet<string> _allowedTitles = new HashSet<string>();
+    private HashSet<string>? _allowedTitles;
     private int _chunkSizeTokens = 0;
     private int _overlapTokens = 0;
     private string _collection = "";
-    private string logFile = "log.txt";
-    private StreamWriter _writer;
-   
-    
+
     private static readonly Dictionary<Regex, string> CategoryKeywordMap = new()
     {
         [new Regex(@"\b(hr|human resources|employee)\b", RegexOptions.IgnoreCase)] = "HR",
@@ -77,13 +72,13 @@ public class SharePointClient : IDisposable
     /// </summary>
     /// <param name="siteUrl">The base URL of the SharePoint site.</param>
     /// <param name="credential">Windows credentials for authentication.</param>
-    public SharePointClient(string siteUrl, NetworkCredential? credential, HashSet<string>? allowedTitles, int chunkSizeTokens, int overlapTokens, string collection)
+    public SharePointClient(string siteUrl, NetworkCredential? credential, HashSet<string> allowedTitles, int chunkSizeTokens, int overlapTokens, string collection)
     {
         if (string.IsNullOrWhiteSpace(siteUrl))
             throw new ArgumentException("Site URL must be provided", nameof(siteUrl));
 
 
-        _allowedTitles = allowedTitles;
+        _allowedTitles = allowedTitles.Count == 0 ? null : allowedTitles;
         _chunkSizeTokens = chunkSizeTokens;
         _overlapTokens = overlapTokens;
         _collection = collection;
@@ -119,268 +114,228 @@ public class SharePointClient : IDisposable
         _client.DefaultRequestHeaders.Add("Prefer", "odata=minimalmetadata");
 
         _client.DefaultRequestHeaders.Add("X-FORMS_BASED_AUTH_ACCEPTED", "f");
-
-        _writer = new StreamWriter(logFile, true);
-    }
-
-    private void Log(string message)
-    {
-        _writer.WriteLine($"{DateTime.Now:u} {message}");
-        _writer.Flush();
     }
 
     /// <summary>
-    /// Calculates the total number of documents that will be processed for the specified library.
+    /// Recursively enumerates all files within a document library.  The
+    /// <paramref name="libraryRelativeUrl"/> parameter must be the server
+    /// relative URL of the library or folder that you wish to crawl (for
+    /// <summary>
+    /// Recursively counts all documents under the specified library or folder.
+    /// This is used to initialize the progress bar in the UI before processing
+    /// begins.
     /// </summary>
-    /// <param name="libraryRelativeUrl">Server relative URL of the document library to inspect.</param>
-    /// <returns>The total count of documents that meet the filtering criteria.</returns>
-    public async Task<int> GetTotalDocumentCountAsync(string libraryRelativeUrl)
+    /// <param name="libraryRelativeUrl">Server relative URL of the document library or folder to crawl.</param>
+    /// <returns>The total number of documents found.</returns>
+    public async Task<int> CountDocumentsAsync(string libraryRelativeUrl)
     {
         if (string.IsNullOrWhiteSpace(libraryRelativeUrl))
             throw new ArgumentException("Library relative URL must be provided", nameof(libraryRelativeUrl));
 
-        var folders = await GetAllFoldersAsync(libraryRelativeUrl).ConfigureAwait(false);
-        int total = 0;
-        foreach (var folder in folders)
+        var normalizedRelativeUrl = libraryRelativeUrl.StartsWith("/") ? libraryRelativeUrl.Substring(1) : libraryRelativeUrl;
+        normalizedRelativeUrl = normalizedRelativeUrl.EndsWith("?$expand=Folders,Files") ? normalizedRelativeUrl : $"{normalizedRelativeUrl}?$expand=Folders,Files";
+        var endpoint = normalizedRelativeUrl;
+        using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+            return 0;
+
+        using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        using var document = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
+
+        JsonElement root;
+        if (document.RootElement.TryGetProperty("d", out var dProperty))
+            root = dProperty;
+        else
+            root = document.RootElement;
+
+        int count = 0;
+
+        if (root.TryGetProperty("Files", out var filesElement))
         {
-            total += await CountFilesInFolderAsync(folder).ConfigureAwait(false);
+            JsonElement fileArray;
+            if (filesElement.ValueKind == JsonValueKind.Array)
+                fileArray = filesElement;
+            else if (filesElement.TryGetProperty("results", out var fileResults))
+                fileArray = fileResults;
+            else
+                fileArray = default;
+
+            if (fileArray.ValueKind == JsonValueKind.Array)
+                count += fileArray.GetArrayLength();
         }
-        return total;
+
+        if (root.TryGetProperty("Folders", out var foldersElement))
+        {
+            JsonElement folderArray;
+            if (foldersElement.ValueKind == JsonValueKind.Array)
+                folderArray = foldersElement;
+            else if (foldersElement.TryGetProperty("results", out var folderResults))
+                folderArray = folderResults;
+            else
+                folderArray = default;
+
+            if (folderArray.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var folderElement in folderArray.EnumerateArray())
+                {
+                    var folderRelativeUrl = folderElement.GetProperty("odata.id").GetString();
+                    if (!string.IsNullOrWhiteSpace(folderRelativeUrl))
+                        count += await CountDocumentsAsync(folderRelativeUrl).ConfigureAwait(false);
+                }
+            }
+        }
+
+        return count;
     }
 
     /// <summary>
-    /// Enumerates all files in the specified library.  The crawler first
-    /// retrieves a complete list of folders within the library and then
-    /// iterates over each folder to download its files.  Sub‑folders are
-    /// discovered during the initial enumeration so that the folder tree is
-    /// traversed depth‑first before any files are processed.
+    /// Enumerates all documents under the specified library or folder.  For each
+    /// file discovered the crawler yields a <see cref="DocumentInfo"/> instance
+    /// containing the file name, URL, metadata and binary data.
     /// </summary>
-    /// <param name="libraryRelativeUrl">Server relative URL of the document library to crawl.</param>
+    /// <param name="libraryRelativeUrl">Server relative URL of the document library or folder to crawl.</param>
     /// <returns>An asynchronous stream of <see cref="DocumentInfo"/> objects.</returns>
     public async IAsyncEnumerable<DocumentInfo> GetDocumentsAsync(string libraryRelativeUrl)
     {
         if (string.IsNullOrWhiteSpace(libraryRelativeUrl))
             throw new ArgumentException("Library relative URL must be provided", nameof(libraryRelativeUrl));
 
-        var folders = await GetAllFoldersAsync(libraryRelativeUrl).ConfigureAwait(false);
-        foreach (var folder in folders)
+        // Ensure the relative URL starts with a forward slash.
+        var normalizedRelativeUrl = libraryRelativeUrl.StartsWith("/") ? libraryRelativeUrl.Substring(1) : libraryRelativeUrl;
+        normalizedRelativeUrl = normalizedRelativeUrl.EndsWith("?$expand=Folders,Files") ? normalizedRelativeUrl : $"{normalizedRelativeUrl}?$expand=Folders,Files";
+        //normalizedRelativeUrl = UrlEncoder.Default.Encode(normalizedRelativeUrl);
+        // Build the REST endpoint.  We use $expand=Folders,Files so that
+        // information about both folders and files is returned in one call
+        //【697898085085864†L82-L86】.
+        //var escapedRelativeUrl = normalizedRelativeUrl.Replace("'", "''");
+        var endpoint = normalizedRelativeUrl;
+        try
         {
-            ConsoleWindow.SetStatus(folder, string.Empty);
-            await foreach (var doc in ProcessFilesInFolderAsync(folder).ConfigureAwait(false))
-            {
-                yield return doc;
-            }
-        }
-    }
-
-    /// <summary>
-    /// Recursively builds a list of all folder URLs beneath the supplied
-    /// library URL.
-    /// </summary>
-    private async Task<List<string>> GetAllFoldersAsync(string rootRelativeUrl)
-    {
-        var folders = new List<string>();
-        var stack = new Stack<string>();
-        stack.Push(rootRelativeUrl);
-
-        while (stack.Count > 0)
-        {
-            var current = stack.Pop();
-            folders.Add(current);
-
-            var encoded = Uri.EscapeDataString(current.TrimStart('/'));
-            var endpoint = $"{_siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encoded}')?$select=ServerRelativeUrl&$expand=Folders";
             using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode) continue;
 
-            using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
-            using var document = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
-            JsonElement root = document.RootElement;
-            if (root.TryGetProperty("d", out var d)) root = d;
-
-            if (root.TryGetProperty("Folders", out var foldersElement))
+            if (response.IsSuccessStatusCode)
             {
-                JsonElement folderArray;
-                if (foldersElement.ValueKind == JsonValueKind.Array)
-                    folderArray = foldersElement;
-                else if (foldersElement.TryGetProperty("results", out var folderResults))
-                    folderArray = folderResults;
+
+                using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+                using var document = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
+
+                // Detect whether the JSON payload is wrapped in a top‑level "d" property
+                // (verbose OData) or not (minimal metadata).  Some SharePoint
+                // configurations return the entity directly without a wrapper, as
+                // illustrated by the sample response provided in the user's report.
+                JsonElement root;
+                if (document.RootElement.TryGetProperty("d", out var dProperty))
+                {
+                    root = dProperty;
+                }
                 else
-                    folderArray = default;
-
-                if (folderArray.ValueKind == JsonValueKind.Array)
                 {
-                    foreach (var folderElement in folderArray.EnumerateArray())
+                    root = document.RootElement;
+                }
+
+                // Enumerate files first.  In verbose responses the Files collection
+                // contains a "results" property with the actual array.  In minimal
+                // metadata responses the Files property itself is the array.  We
+                // support both shapes.
+                if (root.TryGetProperty("Files", out var filesElement))
+                {
+                    JsonElement fileArray;
+                    // When Files is already an array (minimal metadata) avoid calling
+                    // TryGetProperty on it since that will throw an exception.  Only
+                    // attempt to read the "results" property if the Files element is
+                    // an object.
+                    if (filesElement.ValueKind == JsonValueKind.Array)
                     {
-                        if (folderElement.TryGetProperty("ServerRelativeUrl", out var serverUrl))
+                        fileArray = filesElement;
+                    }
+                    else if (filesElement.TryGetProperty("results", out var fileResults))
+                    {
+                        fileArray = fileResults;
+                    }
+                    else
+                    {
+                        fileArray = default;
+                    }
+
+                    if (fileArray.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var fileElement in fileArray.EnumerateArray())
                         {
-                            var url = serverUrl.GetString();
-                            if (!string.IsNullOrWhiteSpace(url))
-                                stack.Push(url);
+                            DocumentInfo? docInfo = null;
+                            var start = DateTime.Now;
+                            try
+                            {
+                                docInfo = await FetchFileInfoAsync(fileElement).ConfigureAwait(false);
+                                if (_allowedTitles != null && !_allowedTitles.Contains(docInfo.Name) &&
+
+                                    !_allowedTitles.Contains(docInfo.Metadata.GetValueOrDefault("Title")?.ToString()))
+                                    continue;
+
+
+                                ConsoleWindow.StartDocument(docInfo, start);
+                                await SendToExternalApiAsync(docInfo).ConfigureAwait(false);
+                                var elapsed = DateTime.Now - start;
+                                ConsoleWindow.CompleteDocument(docInfo, elapsed, true);
+                            }
+                            catch (Exception ex)
+                            {
+                                var elapsed = DateTime.Now - start;
+                                ConsoleWindow.Error($"Error: {ex.Message} (elapsed {elapsed.TotalSeconds:F1}s)");
+                                if (docInfo != null)
+                                {
+                                    ErrorLogger.Log(docInfo.Name, docInfo.Url, ex.Message);
+                                    ConsoleWindow.CompleteDocument(docInfo, elapsed, false, ex.Message);
+                                    docInfo = null;
+                                }
+                            }
+                            if (docInfo != null)
+                            {
+                                yield return docInfo;
+                            }
+                        }
+                    }
+                }
+
+                // Enumerate folders and recurse into each one.  As with Files, the
+                // Folders collection may either have a "results" property or be the
+                // array itself depending on the metadata level.
+                if (root.TryGetProperty("Folders", out var foldersElement))
+                {
+                    JsonElement folderArray;
+                    // As with Files, check if Folders is an array before reading the
+                    // "results" property to avoid invalid operations.
+                    if (foldersElement.ValueKind == JsonValueKind.Array)
+                    {
+                        folderArray = foldersElement;
+                    }
+                    else if (foldersElement.TryGetProperty("results", out var folderResults))
+                    {
+                        folderArray = folderResults;
+                    }
+                    else
+                    {
+                        folderArray = default;
+                    }
+
+                    if (folderArray.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var folderElement in folderArray.EnumerateArray())
+                        {
+                            var folderRelativeUrl = folderElement.GetProperty("odata.id").GetString();
+                            if (!string.IsNullOrWhiteSpace(folderRelativeUrl))
+                            {
+                                await foreach (var nestedDoc in GetDocumentsAsync(folderRelativeUrl).ConfigureAwait(false))
+                                {
+                                    yield return nestedDoc;
+                                }
+                            }
                         }
                     }
                 }
             }
+
         }
-
-        return folders;
-    }
-
-    /// <summary>
-    /// Retrieves all files within the specified folder.
-    /// </summary>
-    private async IAsyncEnumerable<DocumentInfo> ProcessFilesInFolderAsync(string folderRelativeUrl)
-    {
-        var encoded = Uri.EscapeDataString(folderRelativeUrl);
-        var endpoint = $"{_siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encoded}')?$expand=Files,ListItemAllFields,Files/ListItemAllFields";
-        using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
-        {
-            Log($"Request to {endpoint} failed with {response.StatusCode}");
-            yield break;
-        }
-
-        using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
-        using var document = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
-        JsonElement root = document.RootElement;
-        if (root.TryGetProperty("d", out var dProp)) root = dProp;
-
-        if (root.TryGetProperty("Files", out var filesElement))
-        {
-            JsonElement fileArray;
-            if (filesElement.ValueKind == JsonValueKind.Array)
-                fileArray = filesElement;
-            else if (filesElement.TryGetProperty("results", out var fileResults))
-                fileArray = fileResults;
-            else
-                fileArray = default;
-
-            if (fileArray.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var fileElement in fileArray.EnumerateArray())
-                {
-                    if (!HasDocumentContentType(fileElement))
-                        continue;
-
-                    DocumentInfo? docInfo = null;
-                    var start = DateTime.Now;
-                    try
-                    {
-                        docInfo = await FetchFileInfoAsync(fileElement).ConfigureAwait(false);
-                        if (_allowedTitles != null && !_allowedTitles.Contains(docInfo.Name) && !_allowedTitles.Contains(docInfo.Metadata.GetValueOrDefault("Title")?.ToString()))
-                            continue;
-
-                        ConsoleWindow.SetStatus(folderRelativeUrl, docInfo.Name);
-                        ConsoleWindow.StartDocument(docInfo, start);
-                        await SendToExternalApiAsync(docInfo).ConfigureAwait(false);
-                        var elapsed = DateTime.Now - start;
-                        ConsoleWindow.CompleteDocument(docInfo, elapsed, true);
-                    }
-                    catch (Exception ex)
-                    {
-                        var elapsed = DateTime.Now - start;
-                        ConsoleWindow.Error($"Error: {ex.Message} (elapsed {elapsed.TotalSeconds:F1}s)");
-                        if (docInfo != null)
-                        {
-                            ErrorLogger.Log(docInfo.Name, docInfo.Url, ex.Message);
-                            ConsoleWindow.CompleteDocument(docInfo, elapsed, false, ex.Message);
-                        }
-                        docInfo = null;
-                    }
-                    if (docInfo != null)
-                    {
-                        yield return docInfo;
-                    }
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// Counts the number of files within the specified folder that meet the filtering criteria.
-    /// </summary>
-    private async Task<int> CountFilesInFolderAsync(string folderRelativeUrl)
-    {
-        var encoded = Uri.EscapeDataString(folderRelativeUrl);
-        var endpoint = $"{_siteUrl}/_api/web/GetFolderByServerRelativeUrl('{encoded}')?$expand=Files,ListItemAllFields,Files/ListItemAllFields";
-        using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
-        {
-            Log($"Request to {endpoint} failed with {response.StatusCode}");
-            return 0;
-        }
-
-        using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
-        using var document = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
-        JsonElement root = document.RootElement;
-        if (root.TryGetProperty("d", out var dProp)) root = dProp;
-
-        int count = 0;
-        if (root.TryGetProperty("Files", out var filesElement))
-        {
-            JsonElement fileArray;
-            if (filesElement.ValueKind == JsonValueKind.Array)
-                fileArray = filesElement;
-            else if (filesElement.TryGetProperty("results", out var fileResults))
-                fileArray = fileResults;
-            else
-                fileArray = default;
-
-            if (fileArray.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var fileElement in fileArray.EnumerateArray())
-                {
-                    if (!HasDocumentContentType(fileElement))
-                        continue;
-
-                    if (_allowedTitles != null)
-                    {
-                        string? name = null;
-                        if (fileElement.TryGetProperty("Name", out var nameProp))
-                            name = nameProp.GetString();
-                        string? title = null;
-                        if (fileElement.TryGetProperty("Title", out var titleProp))
-                            title = titleProp.GetString();
-                        if (!_allowedTitles.Contains(name ?? string.Empty) && !_allowedTitles.Contains(title ?? string.Empty))
-                            continue;
-                    }
-                    count++;
-                }
-            }
-        }
-        return count;
-    }
-
-    private static bool HasDocumentContentType(JsonElement fileElement)
-    {
-        if (fileElement.ValueKind != JsonValueKind.Object)
-            return false;
-
-        if (fileElement.TryGetProperty("ListItemAllFields", out var listItem))
-        {
-            if (listItem.ValueKind == JsonValueKind.Object)
-            {
-                if (listItem.TryGetProperty("OData__x0068_wg8", out var ct))
-                {
-                    if (ct.ValueKind == JsonValueKind.String)
-                        return string.Equals(ct.GetString(), "Document", StringComparison.OrdinalIgnoreCase);
-                    if (ct.ValueKind == JsonValueKind.Object && ct.TryGetProperty("Name", out var name))
-                        return string.Equals(name.GetString(), "Document", StringComparison.OrdinalIgnoreCase);
-                }
-            }
-        }
-
-        if (fileElement.TryGetProperty("ContentType", out var directCt) && directCt.ValueKind == JsonValueKind.String)
-            return string.Equals(directCt.GetString(), "Document", StringComparison.OrdinalIgnoreCase);
-
-        if (fileElement.TryGetProperty("ContentTypeId", out var directCtId))
-        {
-            var id = directCtId.GetString();
-            if (!string.IsNullOrEmpty(id) && id.StartsWith("0x0101", StringComparison.OrdinalIgnoreCase))
-                return true;
-        }
-
-        return false;
+        finally { }
     }
 
     /// <summary>
@@ -424,11 +379,10 @@ public class SharePointClient : IDisposable
         // Download the binary data for the file using the $value endpoint.  The
         // REST syntax for downloading a file is documented by Microsoft; you
         // call GetFileByServerRelativeUrl and append $value【497258984103498†L142-L163】.
-        if (!string.IsNullOrWhiteSpace(doc.Url) && doc.Url.EndsWith("aspx") != true )
+        if (!string.IsNullOrWhiteSpace(doc.Url))
         {
             var escapedUrl = doc.Url.Replace("'", "''");
             var fileEndpoint = $"{_siteUrl}/_api/web/GetFileByServerRelativeUrl('{escapedUrl}')/$value";
-            
             using var fileResponse = await _client.GetAsync(fileEndpoint).ConfigureAwait(false);
             if (fileResponse.IsSuccessStatusCode)
             {
@@ -444,45 +398,18 @@ public class SharePointClient : IDisposable
 
         return doc;
     }
-    private static IList<string> Tokenize(string text)
-    {
-        // naïve tokenizer: split on whitespace and punctuation
-        return text?
-            .Split(new[] { ' ', '\n', '\r', '\t', '.', ',', ';', ':', '-', '(', ')', '[', ']', '{', '}', '!', '?', '"' }, StringSplitOptions.RemoveEmptyEntries)
-            .ToList() ?? new List<string>();
-    }
-
-    private static List<string> SplitIntoChunks(string text, int chunkSize, int overlap)
-    {
-        var tokens = Tokenize(text);
-        var chunks = new List<string>();
-        for (int start = 0; start < tokens.Count; start += (chunkSize - overlap))
-        {
-            var window = tokens.Skip(start).Take(chunkSize).ToList();
-            if (window.Count == 0) break;
-            chunks.Add(string.Join(" ", window));
-            if (start + chunkSize >= tokens.Count) break;
-        }
-        return chunks;
-    }
-    private string BuildBreadcrumbs(DocumentInfo doc)
-    {
-        string? title = doc.Metadata.TryGetValue("Title", out var t) ? t?.ToString() : doc.Name;
-        return title ?? "";
-    }
-
+    
     protected async Task SendToExternalApiAsync(DocumentInfo doc)
     {
+        // Only process PDF files
         var extension = Path.GetExtension(doc.Name).ToLowerInvariant();
-
-        // Only process PDF files with the new upload endpoint
         if (extension != ".pdf")
         {
-            ConsoleWindow.Info($"Skipping {doc.Name} - only PDF files are supported by the upload endpoint");
+            ConsoleWindow.Info($"Skipping {doc.Name} - only PDF files are supported");
             return;
         }
 
-        // Validate that we have the PDF data
+        // Validate PDF data
         if (doc.Data == null || doc.Data.Length == 0)
         {
             ConsoleWindow.Error($"No data available for {doc.Name}");
@@ -490,47 +417,54 @@ public class SharePointClient : IDisposable
             return;
         }
 
-        // Build the source URL from the SharePoint URL
+        // Build the source URL from SharePoint
         var sourceUrl = $"{_rootUrl}{doc.Url}";
 
-        using var httpClient = new HttpClient
-        {
-            Timeout = TimeSpan.FromMinutes(30)
-        };
+        using var httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
+
+#if DEBUG
+        var url = "http://10.0.0.54:8000/upload-document";
+#else
+        var url = "http://adam.amentumspacemissions.com:8000/upload-document";
+#endif
+
+        // Build multipart/form-data for the /upload-document endpoint
+        using var form = new MultipartFormDataContent();
+
+        // Add the PDF file
+        var fileContent = new ByteArrayContent(doc.Data);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
+        form.Add(fileContent, "file", doc.Name);
+
+        // Add the source_url parameter (required)
+        form.Add(new StringContent(sourceUrl), "source_url");
 
         try
         {
-            // Create multipart/form-data content
-            using var formData = new MultipartFormDataContent();
-
-            // Add the PDF file
-            var fileContent = new ByteArrayContent(doc.Data);
-            fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
-            formData.Add(fileContent, "file", doc.Name);
-
-            // Add the source_url parameter
-            formData.Add(new StringContent(sourceUrl), "source_url");
-
-            // POST to the upload-document endpoint
-            var response = await httpClient.PostAsync(
-                "http://adam.amentumspacemissions.com:8000/upload-document",
-                formData
-            );
+            var response = await httpClient.PostAsync(url, form);
+            var body = await response.Content.ReadAsStringAsync();
 
             if (!response.IsSuccessStatusCode)
             {
-                var errorString = await response.Content.ReadAsStringAsync();
-                ConsoleWindow.Error($"Upload failed: {errorString}");
-                ErrorLogger.Log(doc.Name, doc.Url, errorString);
+                ConsoleWindow.Error($"Upload failed: {body}");
+                ErrorLogger.Log(doc.Name, doc.Url, body);
+                return;
+            }
+
+            // Parse the UploadResponse
+            var uploadResponse = System.Text.Json.JsonSerializer.Deserialize<UploadResponse>(body, new System.Text.Json.JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+
+            if (uploadResponse != null)
+            {
+                ConsoleWindow.Success($"Document uploaded successfully - ID: {uploadResponse.DocumentId}");
+                ConsoleWindow.Info($"Message: {uploadResponse.Message}");
             }
             else
             {
-                var uploadResponse = await response.Content.ReadFromJsonAsync<UploadResponse>();
-                if (uploadResponse != null)
-                {
-                    ConsoleWindow.Success($"Document uploaded successfully - ID: {uploadResponse.DocumentId}");
-                    ConsoleWindow.Info($"Message: {uploadResponse.Message}");
-                }
+                ConsoleWindow.Success("Document uploaded successfully");
             }
         }
         catch (Exception ex)
@@ -540,233 +474,11 @@ public class SharePointClient : IDisposable
         }
     }
 
-
-
-    private static string ExtractPdfText(byte[] data)
-    {
-        using var ms = new MemoryStream(data);
-        using var document = PdfDocument.Open(ms);
-        var sb = new StringBuilder();
-        foreach (var page in document.GetPages())
-        {
-            sb.AppendLine(page.Text);
-        }
-        return sb.ToString();
-    }
-
-    private static string ExtractWordText(byte[] data)
-    {
-        using var ms = new MemoryStream(data);
-        using var doc = WordprocessingDocument.Open(ms, false);
-        var sb = new StringBuilder();
-        var body = doc.MainDocumentPart?.Document.Body;
-        if (body != null)
-        {
-            foreach (var text in body.Descendants<DocumentFormat.OpenXml.Wordprocessing.Text>())
-            {
-                sb.Append(text.Text);
-            }
-        }
-        return sb.ToString();
-    }
-
-    private static string ExtractExcelText(byte[] data)
-    {
-        using var ms = new MemoryStream(data);
-        using var document = SpreadsheetDocument.Open(ms, false);
-        var sb = new StringBuilder();
-        var wbPart = document.WorkbookPart;
-        if (wbPart?.Workbook.Sheets != null)
-        {
-            foreach (Sheet sheet in wbPart.Workbook.Sheets.OfType<Sheet>())
-            {
-                var wsPart = (WorksheetPart)wbPart.GetPartById(sheet.Id!);
-                foreach (var row in wsPart.Worksheet.Descendants<Row>())
-                {
-                    foreach (var cell in row.Descendants<Cell>())
-                    {
-                        var text = GetCellValue(cell, wbPart);
-                        if (!string.IsNullOrWhiteSpace(text))
-                            sb.Append(text).Append(' ');
-                    }
-                    sb.AppendLine();
-                }
-            }
-        }
-        return sb.ToString();
-    }
-
-    private static string GetCellValue(Cell cell, WorkbookPart wbPart)
-    {
-        var value = cell.CellValue?.InnerText ?? string.Empty;
-        if (cell.DataType?.Value == CellValues.SharedString)
-        {
-            var sstPart = wbPart.SharedStringTablePart;
-            if (sstPart != null)
-            {
-                return sstPart.SharedStringTable.ChildElements[int.Parse(value)].InnerText;
-            }
-        }
-        return value;
-    }
-
-    private static string CleanText(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return string.Empty;
-
-        var lines = text.Split('\n');
-        var lineCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        foreach (var line in lines)
-        {
-            var trimmed = line.Trim();
-            if (trimmed.Length == 0) continue;
-            lineCounts[trimmed] = lineCounts.TryGetValue(trimmed, out var c) ? c + 1 : 1;
-        }
-        var totalLines = lines.Length;
-        var sb = new StringBuilder();
-        var inToc = false;
-        foreach (var line in lines)
-        {
-            var trimmed = line.Trim();
-            if (trimmed.Length == 0) continue;
-            if (PageNumberRegex.IsMatch(trimmed) || SignatureRegex.IsMatch(trimmed)) continue;
-            if (lineCounts.TryGetValue(trimmed, out var count) && count > totalLines * 0.5) continue; // header/footer
-            if (!inToc && ToCRegex.IsMatch(trimmed)) { inToc = true; continue; }
-            if (inToc)
-            {
-                if (string.IsNullOrWhiteSpace(trimmed)) inToc = false;
-                continue;
-            }
-            sb.AppendLine(trimmed);
-        }
-
-        var cleaned = sb.ToString();
-        cleaned = Regex.Replace(cleaned, @"\s+", " ");
-        return cleaned.Trim();
-    }
-
-    private static string DeriveTitle(string? original, string text, string fileName)
-    {
-        var firstLine = text.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
-        if (string.IsNullOrWhiteSpace(original) || original.Equals(Path.GetFileNameWithoutExtension(fileName), StringComparison.OrdinalIgnoreCase))
-        {
-            return firstLine ?? original ?? fileName;
-        }
-        return original;
-    }
-
-    private static string? DetectCategory(string text)
-    {
-        foreach (var kvp in CategoryKeywordMap)
-        {
-            if (kvp.Key.IsMatch(text)) return kvp.Value;
-        }
-        return null;
-    }
-
-    private static List<string> GenerateKeywords(string text, int max = 10)
-    {
-        var tokens = Regex.Matches(text.ToLowerInvariant(), @"\b[a-z]{3,}\b").Select(m => m.Value)
-            .Where(t => !StopWords.Contains(t));
-        var freq = tokens.GroupBy(t => t).ToDictionary(g => g.Key, g => g.Count());
-        return freq.OrderByDescending(kv => kv.Value).Take(max).Select(kv => kv.Key).ToList();
-    }
-
-    private static string GenerateSummary(string text, int maxSentences = 3)
-    {
-        var sentences = Regex.Split(text, @"(?<=[\.\!\?])\s+").Where(s => !string.IsNullOrWhiteSpace(s)).ToArray();
-        return string.Join(" ", sentences.Take(maxSentences));
-    }
-    private List<string> ExtractKeywords(DocumentInfo doc, string field)
-    {
-        if (!doc.Metadata.TryGetValue(field, out var raw)) return new();
-        if (raw is string s && s.Contains(";")) return s.Split(';').Select(x => x.Trim()).ToList();
-        if (raw is IEnumerable<object> list) return list.Select(x => x?.ToString()).Where(x => !string.IsNullOrWhiteSpace(x)).ToList()!;
-        return new() { raw?.ToString()! };
-    }
-
-    private class IngestResponse
-    {
-        [JsonPropertyName("Success")]
-        public bool Success { get; set; }
-        
-        [JsonPropertyName("chunks")]
-        public int Chunks { get; set; }
-    }
-
     /// <summary>
     /// Releases the underlying <see cref="HttpClient"/> and associated handler.
     /// </summary>
     public void Dispose()
     {
         _client.Dispose();
-        _writer.Flush();
-        _writer.Close();    
-        _writer.Dispose();
-    }
-
-    
-
-    /// <summary>
-    /// Calls the infer_metadata endpoint to obtain a summary, category and keyword list
-    /// for a given document.  If the call fails for any reason, null is returned
-    /// and callers should fall back to local heuristics.
-    /// </summary>
-    /// <param name="text">The cleaned text of the document.</param>
-    /// <param name="doc">The document info for metadata (title, doc code).</param>
-    /// <returns>An InferMetadataResult on success, otherwise null.</returns>
-    private async Task<InferMetadataResult?> InferMetadataAsync(string text, DocumentInfo doc)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return null;
-
-        // Build the request payload.  Include title and doc_code if available.
-        string? title = doc.Metadata.TryGetValue("Title", out var tVal) ? tVal?.ToString() : doc.Name;
-        string? docCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var dcVal) ? dcVal?.ToString() : null;
-        var payload = new
-        {
-            text = text,
-            title = title,
-            doc_code = docCode
-        };
-
-        var json = JsonSerializer.Serialize(payload);
-        using var httpClient = new HttpClient
-        {
-            Timeout = TimeSpan.FromMinutes(30)
-        };
-        var content = new StringContent(json, Encoding.UTF8, "application/json");
-        try
-        {
-            var response = await httpClient.PostAsync("http://adam.amentumspacemissions.com:8000/infer_metadata", content).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode)
-            {
-                var err = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                ConsoleWindow.Error($"infer_metadata HTTP {response.StatusCode}: {err}");
-                return null;
-            }
-            var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
-            var options = new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            };
-            var result = await JsonSerializer.DeserializeAsync<InferMetadataResult>(stream, options).ConfigureAwait(false);
-            return result;
-        }
-        catch (Exception ex)
-        {
-            ConsoleWindow.Error($"infer_metadata exception: {ex.Message}");
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Helper DTO for infer_metadata responses.
-    /// </summary>
-    private class InferMetadataResult
-    {
-        public string? Summary { get; set; }
-        public string? Category { get; set; }
-        public List<string> Keywords { get; set; } = new();
-        public Dictionary<string, JsonElement>? Debug { get; set; }
     }
 }
