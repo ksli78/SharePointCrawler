@@ -34,5 +34,11 @@ IngestResponse.cs
 ProjectEvaluation
 FileContentIndex
 v17
-/docstoingest.txt
-/log.txt
+/.vs/SharePointCrawler/CopilotIndices/17.14.794.21998/CodeChunks.db
+/.vs/SharePointCrawler/CopilotIndices/17.14.794.21998/CodeChunks.db-shm
+/.vs/SharePointCrawler/CopilotIndices/17.14.794.21998/CodeChunks.db-wal
+/.vs/SharePointCrawler/CopilotIndices/17.14.794.21998/SemanticSymbols.db
+/.vs/SharePointCrawler/CopilotIndices/17.14.794.21998/SemanticSymbols.db-shm
+/.vs/SharePointCrawler/CopilotIndices/17.14.794.21998/SemanticSymbols.db-wal
+/.vs/SharePointCrawler/CopilotIndices/17.14.1231.31060/*.db
+/.vs/SharePointCrawler/copilot-chat/33d86651/sessions
