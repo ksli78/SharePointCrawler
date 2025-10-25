@@ -441,6 +441,10 @@ public class SharePointClient : IDisposable
 
         using var httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
 
+        // Build the URL with source_url as a query parameter (required by the API)
+        var encodedSourceUrl = Uri.EscapeDataString(sourceUrl);
+        var uploadUrl = $"{_ingestUrl}?source_url={encodedSourceUrl}";
+
         // Build multipart/form-data for the /upload-document endpoint
         using var form = new MultipartFormDataContent();
 
@@ -449,15 +453,11 @@ public class SharePointClient : IDisposable
         fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
         form.Add(fileContent, "file", doc.Name);
 
-        // Add the source_url parameter (required)
-        form.Add(new StringContent(sourceUrl), "source_url");
-
-        ConsoleWindow.Info($"Uploading to: {_ingestUrl}");
-        ConsoleWindow.Info($"Source URL: {sourceUrl}");
+        ConsoleWindow.Info($"Uploading to: {uploadUrl}");
 
         try
         {
-            var response = await httpClient.PostAsync(_ingestUrl, form);
+            var response = await httpClient.PostAsync(uploadUrl, form);
             var body = await response.Content.ReadAsStringAsync();
 
             if (!response.IsSuccessStatusCode)
