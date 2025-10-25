@@ -9,17 +9,18 @@ namespace SharePointCrawler;
 
 public partial class MainForm : Form
 {
-    private readonly TextBox _txtSiteUrl = new() { PlaceholderText = "Site URL", Width = 300 };
-    private readonly TextBox _txtLibraryUrl = new() { PlaceholderText = "Library Relative URL", Width = 300 };
-    private readonly TextBox _txtUsername = new() { PlaceholderText = "Username", Width = 150 };
-    private readonly TextBox _txtPassword = new() { PlaceholderText = "Password", UseSystemPasswordChar = true, Width = 150 };
-    private readonly TextBox _txtDomain = new() { PlaceholderText = "Domain", Width = 150 };
-    private readonly Button _btnStart = new() { Text = "Start", Width = 80 };
+    private TextBox _txtSiteUrl = new() { PlaceholderText = "Site URL", Width = 300 };
+    private TextBox _txtLibraryUrl = new() { PlaceholderText = "Library Relative URL", Width = 300 };
+    private TextBox _txtUsername = new() { PlaceholderText = "Username", Width = 150 };
+    private TextBox _txtPassword = new() { PlaceholderText = "Password", UseSystemPasswordChar = true, Width = 150 };
+    private TextBox _txtDomain = new() { PlaceholderText = "Domain", Width = 150 };
+    private TextBox _txtIngestUrl = new() { PlaceholderText = "Ingest URL", Width = 150 };
+    private Button _btnStart = new() { Text = "Start", Width = 80 };
 
-    private readonly RichTextBox _currentPane = new() { ReadOnly = true, Width = 700, Height = 150 };
-    private readonly RichTextBox _previousPane = new() { ReadOnly = true, Width = 700, Height = 150 };
-    private readonly Label _metricsLabel = new() { AutoSize = true };
-    private readonly ProgressBar _progressBar = new() { Width = 700 };
+    private RichTextBox _currentPane = new() { ReadOnly = true, Width = 700, Height = 150 };
+    private RichTextBox _previousPane = new() { ReadOnly = true, Width = 700, Height = 150 };
+    private Label _metricsLabel = new() { AutoSize = true };
+    private ProgressBar _progressBar = new() { Width = 700 };
 
     private SharePointClient? _client;
 
@@ -28,45 +29,46 @@ public partial class MainForm : Form
         Text = "SharePoint Crawler";
         Width = 750;
         Height = 650;
-        var table = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            RowCount = 7,
-            ColumnCount = 2
-        };
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        Controls.Add(table);
+        InitializeComponent();
+        //var table = new TableLayoutPanel
+        //{
+        //    Dock = DockStyle.Fill,
+        //    RowCount = 7,
+        //    ColumnCount = 2
+        //};
+        //table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        //table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        //Controls.Add(table);
 
-        table.Controls.Add(new Label { Text = "Site URL", AutoSize = true }, 0, 0);
-        table.Controls.Add(_txtSiteUrl, 1, 0);
-        table.Controls.Add(new Label { Text = "Library URL", AutoSize = true }, 0, 1);
-        table.Controls.Add(_txtLibraryUrl, 1, 1);
-        table.Controls.Add(new Label { Text = "Username", AutoSize = true }, 0, 2);
-        table.Controls.Add(_txtUsername, 1, 2);
-        table.Controls.Add(new Label { Text = "Password", AutoSize = true }, 0, 3);
-        table.Controls.Add(_txtPassword, 1, 3);
-        table.Controls.Add(new Label { Text = "Domain", AutoSize = true }, 0, 4);
-        table.Controls.Add(_txtDomain, 1, 4);
-        table.Controls.Add(_btnStart, 1, 5);
+        //table.Controls.Add(new Label { Text = "Site URL", AutoSize = true }, 0, 0);
+        //table.Controls.Add(_txtSiteUrl, 1, 0);
+        //table.Controls.Add(new Label { Text = "Library URL", AutoSize = true }, 0, 1);
+        //table.Controls.Add(_txtLibraryUrl, 1, 1);
+        //table.Controls.Add(new Label { Text = "Username", AutoSize = true }, 0, 2);
+        //table.Controls.Add(_txtUsername, 1, 2);
+        //table.Controls.Add(new Label { Text = "Password", AutoSize = true }, 0, 3);
+        //table.Controls.Add(_txtPassword, 1, 3);
+        //table.Controls.Add(new Label { Text = "Domain", AutoSize = true }, 0, 4);
+        //table.Controls.Add(_txtDomain, 1, 4);
+        //table.Controls.Add(_btnStart, 1, 5);
 
-        var outputPanel = new Panel { Dock = DockStyle.Fill };
-        table.Controls.Add(outputPanel, 0, 6);
-        table.SetColumnSpan(outputPanel, 2);
+        //var outputPanel = new Panel { Dock = DockStyle.Fill };
+        //table.Controls.Add(outputPanel, 0, 6);
+        //table.SetColumnSpan(outputPanel, 2);
 
-        var outputLayout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 5, ColumnCount = 1 };
-        outputPanel.Controls.Add(outputLayout);
-        outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        outputLayout.Controls.Add(new Label { Text = "Current Document", AutoSize = true, ForeColor= Color.Blue }, 0, 0);
-        outputLayout.Controls.Add(_currentPane, 0, 1);
-        outputLayout.Controls.Add(new Label { Text = "Previous Document", AutoSize = true }, 0, 2);
-        outputLayout.Controls.Add(_previousPane, 0, 3);
-        outputLayout.Controls.Add(_progressBar, 0, 4);
-        outputLayout.Controls.Add(_metricsLabel, 0, 5);
+        //var outputLayout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 5, ColumnCount = 1 };
+        //outputPanel.Controls.Add(outputLayout);
+        //outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        //outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        //outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        //outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        //outputLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        //outputLayout.Controls.Add(new Label { Text = "Current Document", AutoSize = true, ForeColor = Color.Blue }, 0, 0);
+        //outputLayout.Controls.Add(_currentPane, 0, 1);
+        //outputLayout.Controls.Add(new Label { Text = "Previous Document", AutoSize = true }, 0, 2);
+        //outputLayout.Controls.Add(_previousPane, 0, 3);
+        //outputLayout.Controls.Add(_progressBar, 0, 4);
+        //outputLayout.Controls.Add(_metricsLabel, 0, 5);
 
         _btnStart.Click += BtnStart_Click;
     }
@@ -154,4 +156,9 @@ public partial class MainForm : Form
         ConsoleColor.Green => Color.Green,
         _ => Color.White
     };
+
+    private void _txtSiteUrl_TextChanged(object sender, EventArgs e)
+    {
+
+    }
 }

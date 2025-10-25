@@ -11,16 +11,7 @@ partial class MainForm
     /// </summary>
     private System.ComponentModel.IContainer components = null;
 
-    private TextBox _txtSiteUrl;
-    private TextBox _txtLibraryUrl;
-    private TextBox _txtUsername;
-    private TextBox _txtPassword;
-    private TextBox _txtDomain;
-    private TextBox _txtIngestUrl;
-    private Button _btnStart;
-    private RichTextBox _currentPane;
-    private RichTextBox _previousPane;
-    private ProgressBar _progressBar;
+
 
     /// <summary>
     /// Clean up any resources being used.
@@ -59,6 +50,7 @@ partial class MainForm
         _txtSiteUrl.PlaceholderText = "Site URL";
         _txtSiteUrl.Size = new Size(282, 23);
         _txtSiteUrl.TabIndex = 1;
+        _txtSiteUrl.TextChanged += _txtSiteUrl_TextChanged;
         // 
         // _txtLibraryUrl
         // 
@@ -175,6 +167,5 @@ partial class MainForm
 
     #endregion
 
-    private Label _metricsLabel;
 }
 

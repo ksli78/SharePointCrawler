@@ -423,7 +423,7 @@ public class SharePointClient : IDisposable
         using var httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
 
 #if DEBUG
-        var url = "http://10.0.0.54:8000/upload-document";
+        var url = "http://adam.slisoftware.com:8000/upload-document";
 #else
         var url = "http://adam.amentumspacemissions.com:8000/upload-document";
 #endif
