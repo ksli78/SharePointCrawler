@@ -473,126 +473,25 @@ public class SharePointClient : IDisposable
 
     protected async Task SendToExternalApiAsync(DocumentInfo doc)
     {
-        string? textContent = null;
         var extension = Path.GetExtension(doc.Name).ToLowerInvariant();
-        try
+
+        // Only process PDF files with the new upload endpoint
+        if (extension != ".pdf")
         {
-            switch (extension)
-            {
-                case ".txt":
-                case ".md":
-                    textContent = Encoding.UTF8.GetString(doc.Data);
-                    break;
-                case ".pdf":
-                    PdfToMarkdownConverter converter = new PdfToMarkdownConverter();
-                    textContent = converter.ConvertToMarkdown(doc.Data);
-                    break;
-                case ".docx":
-                    textContent = ExtractWordText(doc.Data);
-                    break;
-                case ".xlsx":
-                    textContent = ExtractExcelText(doc.Data);
-                    break;
-            }
-        }
-        catch (Exception ex)
-        {
-            var msg = $"Failed to extract text for {doc.Name}: {ex.Message}";
-            ConsoleWindow.Error(msg);
-            ErrorLogger.Log(doc.Name, doc.Url, msg);
+            ConsoleWindow.Info($"Skipping {doc.Name} - only PDF files are supported by the upload endpoint");
+            return;
         }
 
-        if (textContent != null)
+        // Validate that we have the PDF data
+        if (doc.Data == null || doc.Data.Length == 0)
         {
-            textContent = CleanText(textContent);
-            // Only proceed if we have enough cleaned text.  The infer_metadata
-            // endpoint requires a reasonable length to produce a summary and
-            // keywords.  If the document is too short, skip ingestion.
-            if (string.IsNullOrWhiteSpace(textContent) || textContent.Length < 500)
-            {
-                ConsoleWindow.Info($"Skipping {doc.Name} due to insufficient content ({textContent?.Length ?? 0} chars).");
-                return;
-            }
-        }
-        // Call the infer_metadata API to obtain summary, category and keywords.
-        string? inferredSummary = null;
-        string? inferredCategory = null;
-        List<string>? inferredKeywords = null;
-
-        if (!string.IsNullOrWhiteSpace(textContent))
-        {
-            try
-            {
-                var meta = await InferMetadataAsync(textContent, doc).ConfigureAwait(false);
-                if (meta != null)
-                {
-                    inferredSummary = meta.Summary;
-                    inferredCategory = meta.Category;
-                    inferredKeywords = meta.Keywords;
-                }
-            }
-            catch (Exception ex)
-            {
-                ConsoleWindow.Error($"infer_metadata failed: {ex.Message}");
-            }
+            ConsoleWindow.Error($"No data available for {doc.Name}");
+            ErrorLogger.Log(doc.Name, doc.Url, "No data available");
+            return;
         }
 
-        var breadcrumbs = BuildBreadcrumbs(doc);
-        var chunks = textContent != null
-            ? SplitIntoChunks(textContent, _chunkSizeTokens, _overlapTokens)
-            : new List<string> { null }; // fallback to whole file if no text
-
-        List<IngestChunk> ingestChunks = new List<IngestChunk>();
-
-        foreach (var (chunkText, idx) in chunks.Select((c, i) => (c, i)))
-        {
-            var inChunk = new IngestChunk()
-            {
-                AllowedGroups = ["everyone"],
-                SpWebUrl = $"{_rootUrl}{doc.Url}",
-                SpItemId = doc.Metadata.TryGetValue("UniqueId", out var id) ? id?.ToString() : new Guid().ToString(),
-                ETag = doc.Metadata.TryGetValue("ETag", out var etag) ? etag?.ToString() : null,
-                Title = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : doc.Name,
-                FileName = doc.Name,
-                TextContent = chunkText,
-                ContentBytes = textContent is null ? Convert.ToBase64String(doc.Data) : null,
-                Collection = _collection,
-                ChunkIndex = idx,
-                Breadcrumbs = breadcrumbs,
-                ChunkSize = _chunkSizeTokens,
-                ChunkOverlap = _overlapTokens,
-                Org = doc.Metadata.TryGetValue("Org", out var org) ? org?.ToString() : null,
-                OrgCode = doc.Metadata.TryGetValue("Org_x0020_Code", out var orgCode) ? orgCode?.ToString() : null,
-                DocCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var docCode) ? docCode?.ToString() : null,
-                Owner = doc.Metadata.TryGetValue("Owner0", out var owner) ? owner?.ToString() : null,
-                Version = doc.Metadata.TryGetValue("Version_", out var version) ? version?.ToString() : null,
-                RevisionDate = doc.Metadata.TryGetValue("Revision_x0020_Date", out var rev) ? rev?.ToString() : null,
-                LatestReviewDate = doc.Metadata.TryGetValue("Latest_x0020_Review_x0020_Date", out var latest) ? latest?.ToString() : null,
-                DocumentReviewDate = doc.Metadata.TryGetValue("aaaa", out var docReview) ? docReview?.ToString() : null,
-                ReviewApprovalDate = doc.Metadata.TryGetValue("Review_x0020_Approval_x0020_Date", out var approval) ? approval?.ToString() : null,
-                EnterpriseKeywords = ExtractKeywords(doc, "TaxKeyword"),
-                AssociationIds = ExtractKeywords(doc, "Association"),
-                // Assign summary, category and keywords from infer_metadata if available,
-                // otherwise fallback to simple heuristics.
-                Summary = inferredSummary ?? (textContent != null ? GenerateSummary(textContent) : null),
-                Category = inferredCategory ?? DetectCategory(textContent ?? string.Empty),
-                Keywords = inferredKeywords != null && inferredKeywords.Count > 0 ? string.Join(",", inferredKeywords) : null,
-            };
-
-            ingestChunks.Add(inChunk);
-        }
-
-
-        var ingestRequest = new IngestRequest()
-        {
-            Chunks = ingestChunks,
-        };
-
-
-        // POST to your local AdamPY endpoint (update URL if needed)
-        var json = JsonSerializer.Serialize(ingestRequest, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
-        var content = new StringContent(json, Encoding.UTF8, "application/json");
-
+        // Build the source URL from the SharePoint URL
+        var sourceUrl = $"{_rootUrl}{doc.Url}";
 
         using var httpClient = new HttpClient
         {
@@ -601,26 +500,42 @@ public class SharePointClient : IDisposable
 
         try
         {
-            var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
+            // Create multipart/form-data content
+            using var formData = new MultipartFormDataContent();
+
+            // Add the PDF file
+            var fileContent = new ByteArrayContent(doc.Data);
+            fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
+            formData.Add(fileContent, "file", doc.Name);
+
+            // Add the source_url parameter
+            formData.Add(new StringContent(sourceUrl), "source_url");
+
+            // POST to the upload-document endpoint
+            var response = await httpClient.PostAsync(
+                "http://adam.amentumspacemissions.com:8000/upload-document",
+                formData
+            );
 
             if (!response.IsSuccessStatusCode)
             {
                 var errorString = await response.Content.ReadAsStringAsync();
-                ConsoleWindow.Error(errorString);
+                ConsoleWindow.Error($"Upload failed: {errorString}");
                 ErrorLogger.Log(doc.Name, doc.Url, errorString);
             }
             else
             {
-                var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
-                if (resp != null)
+                var uploadResponse = await response.Content.ReadFromJsonAsync<UploadResponse>();
+                if (uploadResponse != null)
                 {
-                    ConsoleWindow.Success($"Status:{resp.Success} - {resp.Chunks} Chunks");
+                    ConsoleWindow.Success($"Document uploaded successfully - ID: {uploadResponse.DocumentId}");
+                    ConsoleWindow.Info($"Message: {uploadResponse.Message}");
                 }
             }
         }
         catch (Exception ex)
         {
-            ConsoleWindow.Error(ex.ToString());
+            ConsoleWindow.Error($"Error uploading document: {ex.Message}");
             ErrorLogger.Log(doc.Name, doc.Url, ex.ToString());
         }
     }
