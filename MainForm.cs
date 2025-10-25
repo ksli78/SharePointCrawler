@@ -23,6 +23,7 @@ public partial class MainForm : Form
     private ProgressBar _progressBar = new() { Width = 700 };
 
     private SharePointClient? _client;
+    private UserSettings _settings = new();
 
     public MainForm()
     {
@@ -30,6 +31,9 @@ public partial class MainForm : Form
         Width = 750;
         Height = 650;
         InitializeComponent();
+
+        // Load saved settings
+        LoadSettings();
         //var table = new TableLayoutPanel
         //{
         //    Dock = DockStyle.Fill,
@@ -71,13 +75,21 @@ public partial class MainForm : Form
         //outputLayout.Controls.Add(_metricsLabel, 0, 5);
 
         _btnStart.Click += BtnStart_Click;
+
+        // Wire up text change events to save settings
+        _txtSiteUrl.TextChanged += SaveSettingsOnChange;
+        _txtLibraryUrl.TextChanged += SaveSettingsOnChange;
+        _txtUsername.TextChanged += SaveSettingsOnChange;
+        _txtPassword.TextChanged += SaveSettingsOnChange;
+        _txtDomain.TextChanged += SaveSettingsOnChange;
+        _txtIngestUrl.TextChanged += SaveSettingsOnChange;
     }
 
     private async void BtnStart_Click(object? sender, EventArgs e)
     {
         _btnStart.Enabled = false;
         var credential = new NetworkCredential(_txtUsername.Text, _txtPassword.Text, _txtDomain.Text);
-        _client = new SharePointClient(_txtSiteUrl.Text, credential, new HashSet<string>(), 350, 80, "docs_v2");
+        _client = new SharePointClient(_txtSiteUrl.Text, credential, new HashSet<string>(), 350, 80, "docs_v2", _txtIngestUrl.Text);
         var libraryUrl = $"{_txtSiteUrl.Text}/_api/web/GetFolderByServerRelativeUrl('{_txtLibraryUrl.Text}')?$expand=Folders,Files";
         int total = await _client.CountDocumentsAsync(libraryUrl);
         ConsoleWindow.Initialize(this, total);
@@ -160,5 +172,27 @@ public partial class MainForm : Form
     private void _txtSiteUrl_TextChanged(object sender, EventArgs e)
     {
 
+    }
+
+    private void LoadSettings()
+    {
+        _settings = UserSettings.Load();
+        _txtSiteUrl.Text = _settings.SiteUrl ?? "";
+        _txtLibraryUrl.Text = _settings.LibraryUrl ?? "";
+        _txtUsername.Text = _settings.Username ?? "";
+        _txtPassword.Text = _settings.Password ?? "";
+        _txtDomain.Text = _settings.Domain ?? "";
+        _txtIngestUrl.Text = _settings.IngestUrl ?? "";
+    }
+
+    private void SaveSettingsOnChange(object? sender, EventArgs e)
+    {
+        _settings.SiteUrl = _txtSiteUrl.Text;
+        _settings.LibraryUrl = _txtLibraryUrl.Text;
+        _settings.Username = _txtUsername.Text;
+        _settings.Password = _txtPassword.Text;
+        _settings.Domain = _txtDomain.Text;
+        _settings.IngestUrl = _txtIngestUrl.Text;
+        _settings.Save();
     }
 }

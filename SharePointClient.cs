@@ -49,6 +49,7 @@ public class SharePointClient : IDisposable
     private int _chunkSizeTokens = 0;
     private int _overlapTokens = 0;
     private string _collection = "";
+    private string _ingestUrl = "";
 
     private static readonly Dictionary<Regex, string> CategoryKeywordMap = new()
     {
@@ -72,7 +73,8 @@ public class SharePointClient : IDisposable
     /// </summary>
     /// <param name="siteUrl">The base URL of the SharePoint site.</param>
     /// <param name="credential">Windows credentials for authentication.</param>
-    public SharePointClient(string siteUrl, NetworkCredential? credential, HashSet<string> allowedTitles, int chunkSizeTokens, int overlapTokens, string collection)
+    /// <param name="ingestUrl">The URL of the ingest API endpoint.</param>
+    public SharePointClient(string siteUrl, NetworkCredential? credential, HashSet<string> allowedTitles, int chunkSizeTokens, int overlapTokens, string collection, string ingestUrl)
     {
         if (string.IsNullOrWhiteSpace(siteUrl))
             throw new ArgumentException("Site URL must be provided", nameof(siteUrl));
@@ -82,6 +84,7 @@ public class SharePointClient : IDisposable
         _chunkSizeTokens = chunkSizeTokens;
         _overlapTokens = overlapTokens;
         _collection = collection;
+        _ingestUrl = ingestUrl;
 
 
         // Trim trailing slashes from the site URL so we don't end up with
@@ -417,16 +420,26 @@ public class SharePointClient : IDisposable
             return;
         }
 
+        // Validate ingest URL is configured
+        if (string.IsNullOrWhiteSpace(_ingestUrl))
+        {
+            ConsoleWindow.Error("Ingest URL is not configured");
+            ErrorLogger.Log(doc.Name, doc.Url, "Ingest URL is not configured");
+            return;
+        }
+
         // Build the source URL from SharePoint
         var sourceUrl = $"{_rootUrl}{doc.Url}";
 
-        using var httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
+        // Validate source URL is not empty
+        if (string.IsNullOrWhiteSpace(sourceUrl))
+        {
+            ConsoleWindow.Error($"Could not build source URL for {doc.Name}");
+            ErrorLogger.Log(doc.Name, doc.Url, "Source URL is empty");
+            return;
+        }
 
-#if DEBUG
-        var url = "http://adam.slisoftware.com:8000/upload-document";
-#else
-        var url = "http://adam.amentumspacemissions.com:8000/upload-document";
-#endif
+        using var httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
 
         // Build multipart/form-data for the /upload-document endpoint
         using var form = new MultipartFormDataContent();
@@ -439,9 +452,12 @@ public class SharePointClient : IDisposable
         // Add the source_url parameter (required)
         form.Add(new StringContent(sourceUrl), "source_url");
 
+        ConsoleWindow.Info($"Uploading to: {_ingestUrl}");
+        ConsoleWindow.Info($"Source URL: {sourceUrl}");
+
         try
         {
-            var response = await httpClient.PostAsync(url, form);
+            var response = await httpClient.PostAsync(_ingestUrl, form);
             var body = await response.Content.ReadAsStringAsync();
 
             if (!response.IsSuccessStatusCode)
