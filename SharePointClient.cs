@@ -41,7 +41,6 @@ public class SharePointClient : IDisposable
     private readonly HttpClient _client;
     private readonly string _siteUrl;
     private string _rootUrl = string.Empty;
-    private readonly string _ingestUrl;
     private static readonly Regex PageNumberRegex = new(@"^(page\s*\d+(\s*of\s*\d+)?)|^\d+$", RegexOptions.IgnoreCase);
     private static readonly Regex SignatureRegex = new(@"^(signature|signed|approved by|prepared by).*", RegexOptions.IgnoreCase);
     private static readonly Regex ToCRegex = new(@"table of contents", RegexOptions.IgnoreCase);
@@ -73,7 +72,7 @@ public class SharePointClient : IDisposable
     /// </summary>
     /// <param name="siteUrl">The base URL of the SharePoint site.</param>
     /// <param name="credential">Windows credentials for authentication.</param>
-    public SharePointClient(string siteUrl, NetworkCredential? credential, HashSet<string> allowedTitles, int chunkSizeTokens, int overlapTokens, string collection, string ingestUrl)
+    public SharePointClient(string siteUrl, NetworkCredential? credential, HashSet<string> allowedTitles, int chunkSizeTokens, int overlapTokens, string collection)
     {
         if (string.IsNullOrWhiteSpace(siteUrl))
             throw new ArgumentException("Site URL must be provided", nameof(siteUrl));
@@ -83,7 +82,6 @@ public class SharePointClient : IDisposable
         _chunkSizeTokens = chunkSizeTokens;
         _overlapTokens = overlapTokens;
         _collection = collection;
-        _ingestUrl = ingestUrl;
 
 
         // Trim trailing slashes from the site URL so we don't end up with
@@ -400,67 +398,78 @@ public class SharePointClient : IDisposable
 
         return doc;
     }
-
+    
     protected async Task SendToExternalApiAsync(DocumentInfo doc)
     {
-        // Only send PDFs (keep your switch if you want to skip other types)
+        // Only process PDF files
         var extension = Path.GetExtension(doc.Name).ToLowerInvariant();
         if (extension != ".pdf")
+        {
+            ConsoleWindow.Info($"Skipping {doc.Name} - only PDF files are supported");
             return;
+        }
 
-        // Extract required fields from metadata
-        string docId = doc.Metadata.TryGetValue("UniqueId", out var idObj) ? idObj?.ToString() ?? "" : "";
-        string sourceUrl = $"{_rootUrl}{doc.Url}";
-        string etag = doc.Metadata.TryGetValue("ETag", out var etagObj) ? etagObj?.ToString() ?? "" : "";
-        string lastModified = doc.Metadata.TryGetValue("Modified", out var modObj) ? modObj?.ToString() ?? "" : "";
-        string title = doc.Metadata.TryGetValue("Title", out var titleObj)
-                       ? titleObj?.ToString() ?? Path.GetFileNameWithoutExtension(doc.Name)
-                       : Path.GetFileNameWithoutExtension(doc.Name);
+        // Validate PDF data
+        if (doc.Data == null || doc.Data.Length == 0)
+        {
+            ConsoleWindow.Error($"No data available for {doc.Name}");
+            ErrorLogger.Log(doc.Name, doc.Url, "No data available");
+            return;
+        }
 
-        using var httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(120) };
-        var url = _ingestUrl;
+        // Build the source URL from SharePoint
+        var sourceUrl = $"{_rootUrl}{doc.Url}";
+
+        using var httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
+
+#if DEBUG
+        var url = "http://10.0.0.54:8000/upload-document";
+#else
+        var url = "http://adam.amentumspacemissions.com:8000/upload-document";
+#endif
+
+        // Build multipart/form-data for the /upload-document endpoint
+        using var form = new MultipartFormDataContent();
+
+        // Add the PDF file
+        var fileContent = new ByteArrayContent(doc.Data);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
+        form.Add(fileContent, "file", doc.Name);
+
+        // Add the source_url parameter (required)
+        form.Add(new StringContent(sourceUrl), "source_url");
 
         try
         {
-            using var form = new MultipartFormDataContent();
-
-            // Add the file content
-            var fileContent = new ByteArrayContent(doc.Data);
-            fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
-            form.Add(fileContent, "file", doc.Name);
-
-            // Add the other fields
-            form.Add(new StringContent(docId), "doc_id");
-            form.Add(new StringContent(sourceUrl), "source_url");
-            form.Add(new StringContent(title), "title");
-            form.Add(new StringContent(""), "category");
-            form.Add(new StringContent(""), "keywords");
-
-
             var response = await httpClient.PostAsync(url, form);
             var body = await response.Content.ReadAsStringAsync();
 
             if (!response.IsSuccessStatusCode)
             {
-                ConsoleWindow.Error(body);
+                ConsoleWindow.Error($"Upload failed: {body}");
                 ErrorLogger.Log(doc.Name, doc.Url, body);
                 return;
             }
 
-            // If your API returns JSON like your IngestResponse, parse it:
-            var resp = System.Text.Json.JsonSerializer.Deserialize<IngestUploadResponse>(body);
-            if (resp != null)
+            // Parse the UploadResponse
+            var uploadResponse = System.Text.Json.JsonSerializer.Deserialize<UploadResponse>(body, new System.Text.Json.JsonSerializerOptions
             {
-                ConsoleWindow.Success($"Status:{resp.Status} - Ingested document {resp.DocumentId} at {resp.Chunks} Chunks   {(string.IsNullOrEmpty(resp.Reason) == false ? $"Reason:{resp.Reason}" : "")}");
+                PropertyNameCaseInsensitive = true
+            });
+
+            if (uploadResponse != null)
+            {
+                ConsoleWindow.Success($"Document uploaded successfully - ID: {uploadResponse.DocumentId}");
+                ConsoleWindow.Info($"Message: {uploadResponse.Message}");
             }
             else
             {
-                ConsoleWindow.Success("Uploaded successfully.");
+                ConsoleWindow.Success("Document uploaded successfully");
             }
         }
         catch (Exception ex)
         {
-            ConsoleWindow.Error(ex.ToString());
+            ConsoleWindow.Error($"Error uploading document: {ex.Message}");
             ErrorLogger.Log(doc.Name, doc.Url, ex.ToString());
         }
     }

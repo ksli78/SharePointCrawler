@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <!-- Configure as a Windows Forms application targeting .NET 8 on Windows -->
+    <!-- Configure as a Windows Forms application targeting .NET 8 on Windows -->
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
