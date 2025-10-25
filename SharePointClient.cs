@@ -41,11 +41,12 @@ public class SharePointClient : IDisposable
     private readonly HttpClient _client;
     private readonly string _siteUrl;
     private string _rootUrl = string.Empty;
+    private readonly string _ingestUrl;
     private static readonly Regex PageNumberRegex = new(@"^(page\s*\d+(\s*of\s*\d+)?)|^\d+$", RegexOptions.IgnoreCase);
     private static readonly Regex SignatureRegex = new(@"^(signature|signed|approved by|prepared by).*", RegexOptions.IgnoreCase);
     private static readonly Regex ToCRegex = new(@"table of contents", RegexOptions.IgnoreCase);
 
-    private HashSet<string> _allowedTitles = new HashSet<string>();
+    private HashSet<string>? _allowedTitles;
     private int _chunkSizeTokens = 0;
     private int _overlapTokens = 0;
     private string _collection = "";
@@ -72,16 +73,17 @@ public class SharePointClient : IDisposable
     /// </summary>
     /// <param name="siteUrl">The base URL of the SharePoint site.</param>
     /// <param name="credential">Windows credentials for authentication.</param>
-    public SharePointClient(string siteUrl, NetworkCredential? credential, HashSet<string> allowedTitles, int chunkSizeTokens, int overlapTokens, string collection)
+    public SharePointClient(string siteUrl, NetworkCredential? credential, HashSet<string> allowedTitles, int chunkSizeTokens, int overlapTokens, string collection, string ingestUrl)
     {
         if (string.IsNullOrWhiteSpace(siteUrl))
             throw new ArgumentException("Site URL must be provided", nameof(siteUrl));
 
 
-        _allowedTitles = allowedTitles;
+        _allowedTitles = allowedTitles.Count == 0 ? null : allowedTitles;
         _chunkSizeTokens = chunkSizeTokens;
         _overlapTokens = overlapTokens;
         _collection = collection;
+        _ingestUrl = ingestUrl;
 
 
         // Trim trailing slashes from the site URL so we don't end up with
@@ -120,11 +122,78 @@ public class SharePointClient : IDisposable
     /// Recursively enumerates all files within a document library.  The
     /// <paramref name="libraryRelativeUrl"/> parameter must be the server
     /// relative URL of the library or folder that you wish to crawl (for
-    /// example, <c>/Shared Documents</c> or
-    /// <c>/sites/DevSite/Documents/SubFolder</c>).  For each file discovered
-    /// the crawler yields a <see cref="DocumentInfo"/> instance containing the
-    /// file name, the server relative URL, a dictionary of metadata and the
-    /// binary data for the file.
+    /// <summary>
+    /// Recursively counts all documents under the specified library or folder.
+    /// This is used to initialize the progress bar in the UI before processing
+    /// begins.
+    /// </summary>
+    /// <param name="libraryRelativeUrl">Server relative URL of the document library or folder to crawl.</param>
+    /// <returns>The total number of documents found.</returns>
+    public async Task<int> CountDocumentsAsync(string libraryRelativeUrl)
+    {
+        if (string.IsNullOrWhiteSpace(libraryRelativeUrl))
+            throw new ArgumentException("Library relative URL must be provided", nameof(libraryRelativeUrl));
+
+        var normalizedRelativeUrl = libraryRelativeUrl.StartsWith("/") ? libraryRelativeUrl.Substring(1) : libraryRelativeUrl;
+        normalizedRelativeUrl = normalizedRelativeUrl.EndsWith("?$expand=Folders,Files") ? normalizedRelativeUrl : $"{normalizedRelativeUrl}?$expand=Folders,Files";
+        var endpoint = normalizedRelativeUrl;
+        using var response = await _client.GetAsync(endpoint).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+            return 0;
+
+        using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        using var document = await JsonDocument.ParseAsync(stream).ConfigureAwait(false);
+
+        JsonElement root;
+        if (document.RootElement.TryGetProperty("d", out var dProperty))
+            root = dProperty;
+        else
+            root = document.RootElement;
+
+        int count = 0;
+
+        if (root.TryGetProperty("Files", out var filesElement))
+        {
+            JsonElement fileArray;
+            if (filesElement.ValueKind == JsonValueKind.Array)
+                fileArray = filesElement;
+            else if (filesElement.TryGetProperty("results", out var fileResults))
+                fileArray = fileResults;
+            else
+                fileArray = default;
+
+            if (fileArray.ValueKind == JsonValueKind.Array)
+                count += fileArray.GetArrayLength();
+        }
+
+        if (root.TryGetProperty("Folders", out var foldersElement))
+        {
+            JsonElement folderArray;
+            if (foldersElement.ValueKind == JsonValueKind.Array)
+                folderArray = foldersElement;
+            else if (foldersElement.TryGetProperty("results", out var folderResults))
+                folderArray = folderResults;
+            else
+                folderArray = default;
+
+            if (folderArray.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var folderElement in folderArray.EnumerateArray())
+                {
+                    var folderRelativeUrl = folderElement.GetProperty("odata.id").GetString();
+                    if (!string.IsNullOrWhiteSpace(folderRelativeUrl))
+                        count += await CountDocumentsAsync(folderRelativeUrl).ConfigureAwait(false);
+                }
+            }
+        }
+
+        return count;
+    }
+
+    /// <summary>
+    /// Enumerates all documents under the specified library or folder.  For each
+    /// file discovered the crawler yields a <see cref="DocumentInfo"/> instance
+    /// containing the file name, URL, metadata and binary data.
     /// </summary>
     /// <param name="libraryRelativeUrl">Server relative URL of the document library or folder to crawl.</param>
     /// <returns>An asynchronous stream of <see cref="DocumentInfo"/> objects.</returns>
@@ -331,434 +400,69 @@ public class SharePointClient : IDisposable
 
         return doc;
     }
-    private static IList<string> Tokenize(string text)
-    {
-        // naïve tokenizer: split on whitespace and punctuation
-        return text?
-            .Split(new[] { ' ', '\n', '\r', '\t', '.', ',', ';', ':', '-', '(', ')', '[', ']', '{', '}', '!', '?', '"' }, StringSplitOptions.RemoveEmptyEntries)
-            .ToList() ?? new List<string>();
-    }
-
-    private static List<string> SplitIntoChunks(string text, int chunkSize, int overlap)
-    {
-        var tokens = Tokenize(text);
-        var chunks = new List<string>();
-        for (int start = 0; start < tokens.Count; start += (chunkSize - overlap))
-        {
-            var window = tokens.Skip(start).Take(chunkSize).ToList();
-            if (window.Count == 0) break;
-            chunks.Add(string.Join(" ", window));
-            if (start + chunkSize >= tokens.Count) break;
-        }
-        return chunks;
-    }
-    private string BuildBreadcrumbs(DocumentInfo doc)
-    {
-        string? title = doc.Metadata.TryGetValue("Title", out var t) ? t?.ToString() : doc.Name;
-        return title ?? "";
-    }
 
     protected async Task SendToExternalApiAsync(DocumentInfo doc)
     {
-        string? textContent = null;
+        // Only send PDFs (keep your switch if you want to skip other types)
         var extension = Path.GetExtension(doc.Name).ToLowerInvariant();
+        if (extension != ".pdf")
+            return;
+
+        // Extract required fields from metadata
+        string docId = doc.Metadata.TryGetValue("UniqueId", out var idObj) ? idObj?.ToString() ?? "" : "";
+        string sourceUrl = $"{_rootUrl}{doc.Url}";
+        string etag = doc.Metadata.TryGetValue("ETag", out var etagObj) ? etagObj?.ToString() ?? "" : "";
+        string lastModified = doc.Metadata.TryGetValue("Modified", out var modObj) ? modObj?.ToString() ?? "" : "";
+        string title = doc.Metadata.TryGetValue("Title", out var titleObj)
+                       ? titleObj?.ToString() ?? Path.GetFileNameWithoutExtension(doc.Name)
+                       : Path.GetFileNameWithoutExtension(doc.Name);
+
+        using var httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(120) };
+        var url = _ingestUrl;
+
         try
         {
-            switch (extension)
+            using var form = new MultipartFormDataContent();
+
+            // Add the file content
+            var fileContent = new ByteArrayContent(doc.Data);
+            fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
+            form.Add(fileContent, "file", doc.Name);
+
+            // Add the other fields
+            form.Add(new StringContent(docId), "doc_id");
+            form.Add(new StringContent(sourceUrl), "source_url");
+            form.Add(new StringContent(title), "title");
+            form.Add(new StringContent(""), "category");
+            form.Add(new StringContent(""), "keywords");
+
+
+            var response = await httpClient.PostAsync(url, form);
+            var body = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
             {
-                case ".txt":
-                case ".md":
-                    textContent = Encoding.UTF8.GetString(doc.Data);
-                    break;
-                case ".pdf":
-                    PdfToMarkdownConverter converter = new PdfToMarkdownConverter();
-                    textContent = converter.ConvertToMarkdown(doc.Data);// ExtractPdfText(doc.Data);
-                    break;
-                case ".docx":
-                    textContent = ExtractWordText(doc.Data);
-                    break;
-                case ".xlsx":
-                    textContent = ExtractExcelText(doc.Data);
-                    break;
+                ConsoleWindow.Error(body);
+                ErrorLogger.Log(doc.Name, doc.Url, body);
+                return;
+            }
+
+            // If your API returns JSON like your IngestResponse, parse it:
+            var resp = System.Text.Json.JsonSerializer.Deserialize<IngestUploadResponse>(body);
+            if (resp != null)
+            {
+                ConsoleWindow.Success($"Status:{resp.Status} - Ingested document {resp.DocumentId} at {resp.Chunks} Chunks   {(string.IsNullOrEmpty(resp.Reason) == false ? $"Reason:{resp.Reason}" : "")}");
+            }
+            else
+            {
+                ConsoleWindow.Success("Uploaded successfully.");
             }
         }
         catch (Exception ex)
         {
-            var msg = $"Failed to extract text for {doc.Name}: {ex.Message}";
-            ConsoleWindow.Error(msg);
-            ErrorLogger.Log(doc.Name, doc.Url, msg);
+            ConsoleWindow.Error(ex.ToString());
+            ErrorLogger.Log(doc.Name, doc.Url, ex.ToString());
         }
-
-        if (textContent != null)
-        {
-            textContent = CleanText(textContent);
-            if (string.IsNullOrWhiteSpace(textContent) || textContent.Length < 500)
-            {
-                ConsoleWindow.Info($"Skipping {doc.Name} due to insufficient content ({textContent?.Length ?? 0} chars).");
-                return;
-            }
-        }
-
-
-
-        var breadcrumbs = BuildBreadcrumbs(doc);
-        var chunks = textContent != null
-            ? SplitIntoChunks(textContent, _chunkSizeTokens, _overlapTokens)
-            : new List<string> { null }; // fallback to whole file if no text
-
-        foreach (var (chunkText, idx) in chunks.Select((c, i) => (c, i)))
-        {
-
-            var payload = new RagIngestDocument
-            {
-                SpWebUrl = $"{_rootUrl}{doc.Url}",
-                SpItemId = doc.Metadata.TryGetValue("UniqueId", out var id) ? id?.ToString() : null,
-                ETag = doc.Metadata.TryGetValue("ETag", out var etag) ? etag?.ToString() : null,
-
-                Org = doc.Metadata.TryGetValue("Org", out var org) ? org?.ToString() : null,
-                OrgCode = doc.Metadata.TryGetValue("Org_x0020_Code", out var orgCode) ? orgCode?.ToString() : null,
-
-                DocCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var docCode) ? docCode?.ToString() : null,
-                Owner = doc.Metadata.TryGetValue("Owner0", out var owner) ? owner?.ToString() : null,
-                Version = doc.Metadata.TryGetValue("Version_", out var version) ? version?.ToString() : null,
-
-                RevisionDate = doc.Metadata.TryGetValue("Revision_x0020_Date", out var rev) ? rev?.ToString() : null,
-                LatestReviewDate = doc.Metadata.TryGetValue("Latest_x0020_Review_x0020_Date", out var latest) ? latest?.ToString() : null,
-                DocumentReviewDate = doc.Metadata.TryGetValue("aaaa", out var docReview) ? docReview?.ToString() : null,
-                ReviewApprovalDate = doc.Metadata.TryGetValue("Review_x0020_Approval_x0020_Date", out var approval) ? approval?.ToString() : null,
-                EnterpriseKeywords = ExtractKeywords(doc, "TaxKeyword"),
-                AssociationIds = ExtractKeywords(doc, "Association"),
-                TextContent = textContent,
-                Summary = textContent != null ? GenerateSummary(textContent) : null,
-                ContentBytes = textContent is null ? Convert.ToBase64String(doc.Data) : null,
-                FileName = doc.Name,
-                Title = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : doc.Name,
-                Collection = _collection, // new property: the collection to ingest into (e.g., docs_v2)
-                ChunkIndex = idx,
-                Breadcrumbs = breadcrumbs,
-                ChunkSize = _chunkSizeTokens,
-                ChunkOverlap = _overlapTokens
-            };
-
-            // POST to your local AdamPY endpoint (update URL if needed)
-            var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-
-            using var httpClient = new HttpClient
-            {
-                Timeout = TimeSpan.FromMinutes(30)
-            };
-
-            try
-            {
-                var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    var errorString = await response.Content.ReadAsStringAsync();
-                    ConsoleWindow.Error(errorString);
-                    ErrorLogger.Log(doc.Name, doc.Url, errorString);
-                }
-                else
-                {
-                    var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
-                    if (resp != null)
-                    {
-                        ConsoleWindow.Success($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
-                        if (!string.IsNullOrWhiteSpace(resp.Summary))
-                            ConsoleWindow.Info($"Summary:{resp.Summary}");
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                ConsoleWindow.Error(ex.ToString());
-                ErrorLogger.Log(doc.Name, doc.Url, ex.ToString());
-            }
-        }
-    }
-
-
-
-    /// <summary>
-    /// A stub that can be overridden to send a document to an external API.  By
-    /// default this method simply completes.  When building your own
-    /// integration you can replace the body of this method with logic to
-    /// transform <see cref="DocumentInfo"/> instances or post them to another
-    /// service.  If network or database calls are required the method can be
-    /// made asynchronous.
-    /// </summary>
-    /// <param name="doc">The document information to send.</param>
-    //protected virtual async Task SendToExternalApiAsync(DocumentInfo doc)
-    //{
-    //    string? textContent = null;
-    //    var extension = Path.GetExtension(doc.Name).ToLowerInvariant();
-
-    //    try
-    //    {
-    //        switch (extension)
-    //        {
-    //            case ".txt":
-    //            case ".md":
-    //                textContent = Encoding.UTF8.GetString(doc.Data);
-    //                break;
-    //            case ".pdf":
-    //                textContent = ExtractPdfText(doc.Data);
-    //                break;
-    //            case ".docx":
-    //                textContent = ExtractWordText(doc.Data);
-    //                break;
-    //            case ".xlsx":
-    //                textContent = ExtractExcelText(doc.Data);
-    //                break;
-    //        }
-    //    }
-    //    catch (Exception ex)
-    //    {
-    //        var msg = $"Failed to extract text for {doc.Name}: {ex.Message}";
-    //        ConsoleWindow.Error(msg);
-    //        ErrorLogger.Log(doc.Name, doc.Url, msg);
-    //    }
-
-    //    if (textContent != null)
-    //    {
-    //        textContent = CleanText(textContent);
-    //        if (string.IsNullOrWhiteSpace(textContent) || textContent.Length < 500)
-    //        {
-    //            ConsoleWindow.Info($"Skipping {doc.Name} due to insufficient content ({textContent?.Length ?? 0} chars).");
-    //            return;
-    //        }
-    //    }
-
-    //    var originalTitle = doc.Metadata.TryGetValue("Title", out var title) ? title?.ToString() : null;
-    //    var derivedTitle = DeriveTitle(originalTitle, textContent ?? string.Empty, doc.Name);
-    //    var categoryMeta = doc.Metadata.TryGetValue("Category", out var categoryValue) ? categoryValue?.ToString() : null;
-    //    var detectedCategory = DetectCategory(textContent ?? string.Empty) ?? categoryMeta ?? "All Documents";
-    //    var metaKeywords = ExtractKeywords(doc, "Keywords");
-    //    var contentKeywords = GenerateKeywords(textContent ?? string.Empty);
-    //    var allKeywords = metaKeywords.Concat(contentKeywords).Where(k => !string.IsNullOrWhiteSpace(k)).Distinct().ToList();
-
-    //    var payload = new RagIngestDocument
-    //    {
-    //        SpWebUrl = $"{_rootUrl}{doc.Url}",
-    //        SpItemId = doc.Metadata.TryGetValue("UniqueId", out var id) ? id?.ToString() : null,
-    //        ETag = doc.Metadata.TryGetValue("ETag", out var etag) ? etag?.ToString() : null,
-
-    //        Title = derivedTitle,
-    //        Org = doc.Metadata.TryGetValue("Org", out var org) ? org?.ToString() : null,
-    //        OrgCode = doc.Metadata.TryGetValue("Org_x0020_Code", out var orgCode) ? orgCode?.ToString() : null,
-    //        Category = detectedCategory,
-    //        DocCode = doc.Metadata.TryGetValue("Document_x0020__x0023_", out var docCode) ? docCode?.ToString() : null,
-    //        Owner = doc.Metadata.TryGetValue("Owner0", out var owner) ? owner?.ToString() : null,
-    //        Version = doc.Metadata.TryGetValue("Version_", out var version) ? version?.ToString() : null,
-
-    //        RevisionDate = doc.Metadata.TryGetValue("Revision_x0020_Date", out var rev) ? rev?.ToString() : null,
-    //        LatestReviewDate = doc.Metadata.TryGetValue("Latest_x0020_Review_x0020_Date", out var latest) ? latest?.ToString() : null,
-    //        DocumentReviewDate = doc.Metadata.TryGetValue("aaaa", out var docReview) ? docReview?.ToString() : null,
-    //        ReviewApprovalDate = doc.Metadata.TryGetValue("Review_x0020_Approval_x0020_Date", out var approval) ? approval?.ToString() : null,
-
-    //        Keywords = allKeywords,
-    //        EnterpriseKeywords = ExtractKeywords(doc, "TaxKeyword"),
-    //        AssociationIds = ExtractKeywords(doc, "Association"),
-
-    //        FileName = doc.Name,
-    //        TextContent = textContent,
-    //        Summary = textContent != null ? GenerateSummary(textContent) : null,
-    //        ContentBytes = textContent is null ? Convert.ToBase64String(doc.Data) : null,
-
-    //    };
-
-    //    using var httpClient = new HttpClient
-    //    {
-    //        Timeout = TimeSpan.FromMinutes(30)
-    //    };
-    //    var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower });
-    //    var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-    //    try
-    //    {
-    //        var response = await httpClient.PostAsync($"http://adam.amentumspacemissions.com:8000/ingest_document", content);
-
-    //        if (!response.IsSuccessStatusCode)
-    //        {
-    //            var errorString = await response.Content.ReadAsStringAsync();
-    //            ConsoleWindow.Error(errorString);
-    //            ErrorLogger.Log(doc.Name, doc.Url, errorString);
-    //        }
-    //        else
-    //        {
-    //            var resp = await response.Content.ReadFromJsonAsync<IngestResponse>();
-    //            if (resp != null)
-    //            {
-    //                ConsoleWindow.Success($"Status:{resp.Success} - Ingested document {resp.DocID} at {resp.Chunks} Chunks via {resp.IngestType}");
-    //                if (!string.IsNullOrWhiteSpace(resp.Summary))
-    //                    ConsoleWindow.Info($"Summary:{resp.Summary}");
-    //            }
-    //        }
-    //    }
-    //    catch (Exception ex)
-    //    {
-    //        ConsoleWindow.Error(ex.ToString());
-    //        ErrorLogger.Log(doc.Name, doc.Url, ex.ToString());
-    //    }
-    //}
-
-    private static string ExtractPdfText(byte[] data)
-    {
-        using var ms = new MemoryStream(data);
-        using var document = PdfDocument.Open(ms);
-        var sb = new StringBuilder();
-        foreach (var page in document.GetPages())
-        {
-            sb.AppendLine(page.Text);
-        }
-        return sb.ToString();
-    }
-
-    private static string ExtractWordText(byte[] data)
-    {
-        using var ms = new MemoryStream(data);
-        using var doc = WordprocessingDocument.Open(ms, false);
-        var sb = new StringBuilder();
-        var body = doc.MainDocumentPart?.Document.Body;
-        if (body != null)
-        {
-            foreach (var text in body.Descendants<DocumentFormat.OpenXml.Wordprocessing.Text>())
-            {
-                sb.Append(text.Text);
-            }
-        }
-        return sb.ToString();
-    }
-
-    private static string ExtractExcelText(byte[] data)
-    {
-        using var ms = new MemoryStream(data);
-        using var document = SpreadsheetDocument.Open(ms, false);
-        var sb = new StringBuilder();
-        var wbPart = document.WorkbookPart;
-        if (wbPart?.Workbook.Sheets != null)
-        {
-            foreach (Sheet sheet in wbPart.Workbook.Sheets.OfType<Sheet>())
-            {
-                var wsPart = (WorksheetPart)wbPart.GetPartById(sheet.Id!);
-                foreach (var row in wsPart.Worksheet.Descendants<Row>())
-                {
-                    foreach (var cell in row.Descendants<Cell>())
-                    {
-                        var text = GetCellValue(cell, wbPart);
-                        if (!string.IsNullOrWhiteSpace(text))
-                            sb.Append(text).Append(' ');
-                    }
-                    sb.AppendLine();
-                }
-            }
-        }
-        return sb.ToString();
-    }
-
-    private static string GetCellValue(Cell cell, WorkbookPart wbPart)
-    {
-        var value = cell.CellValue?.InnerText ?? string.Empty;
-        if (cell.DataType?.Value == CellValues.SharedString)
-        {
-            var sstPart = wbPart.SharedStringTablePart;
-            if (sstPart != null)
-            {
-                return sstPart.SharedStringTable.ChildElements[int.Parse(value)].InnerText;
-            }
-        }
-        return value;
-    }
-
-    private static string CleanText(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return string.Empty;
-
-        var lines = text.Split('\n');
-        var lineCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        foreach (var line in lines)
-        {
-            var trimmed = line.Trim();
-            if (trimmed.Length == 0) continue;
-            lineCounts[trimmed] = lineCounts.TryGetValue(trimmed, out var c) ? c + 1 : 1;
-        }
-        var totalLines = lines.Length;
-        var sb = new StringBuilder();
-        var inToc = false;
-        foreach (var line in lines)
-        {
-            var trimmed = line.Trim();
-            if (trimmed.Length == 0) continue;
-            if (PageNumberRegex.IsMatch(trimmed) || SignatureRegex.IsMatch(trimmed)) continue;
-            if (lineCounts.TryGetValue(trimmed, out var count) && count > totalLines * 0.5) continue; // header/footer
-            if (!inToc && ToCRegex.IsMatch(trimmed)) { inToc = true; continue; }
-            if (inToc)
-            {
-                if (string.IsNullOrWhiteSpace(trimmed)) inToc = false;
-                continue;
-            }
-            sb.AppendLine(trimmed);
-        }
-
-        var cleaned = sb.ToString();
-        cleaned = Regex.Replace(cleaned, @"\s+", " ");
-        return cleaned.Trim();
-    }
-
-    private static string DeriveTitle(string? original, string text, string fileName)
-    {
-        var firstLine = text.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
-        if (string.IsNullOrWhiteSpace(original) || original.Equals(Path.GetFileNameWithoutExtension(fileName), StringComparison.OrdinalIgnoreCase))
-        {
-            return firstLine ?? original ?? fileName;
-        }
-        return original;
-    }
-
-    private static string? DetectCategory(string text)
-    {
-        foreach (var kvp in CategoryKeywordMap)
-        {
-            if (kvp.Key.IsMatch(text)) return kvp.Value;
-        }
-        return null;
-    }
-
-    private static List<string> GenerateKeywords(string text, int max = 10)
-    {
-        var tokens = Regex.Matches(text.ToLowerInvariant(), @"\b[a-z]{3,}\b").Select(m => m.Value)
-            .Where(t => !StopWords.Contains(t));
-        var freq = tokens.GroupBy(t => t).ToDictionary(g => g.Key, g => g.Count());
-        return freq.OrderByDescending(kv => kv.Value).Take(max).Select(kv => kv.Key).ToList();
-    }
-
-    private static string GenerateSummary(string text, int maxSentences = 3)
-    {
-        var sentences = Regex.Split(text, @"(?<=[\.\!\?])\s+").Where(s => !string.IsNullOrWhiteSpace(s)).ToArray();
-        return string.Join(" ", sentences.Take(maxSentences));
-    }
-    private List<string> ExtractKeywords(DocumentInfo doc, string field)
-    {
-        if (!doc.Metadata.TryGetValue(field, out var raw)) return new();
-        if (raw is string s && s.Contains(";")) return s.Split(';').Select(x => x.Trim()).ToList();
-        if (raw is IEnumerable<object> list) return list.Select(x => x?.ToString()).Where(x => !string.IsNullOrWhiteSpace(x)).ToList()!;
-        return new() { raw?.ToString()! };
-    }
-
-    private class IngestResponse
-    {
-        [JsonPropertyName("ok")]
-        public bool Success { get; set; }
-        [JsonPropertyName("doc_id")]
-        public string? DocID { get; set; }
-        [JsonPropertyName("chunks")]
-        public int Chunks { get; set; }
-        [JsonPropertyName("used")]
-        public string? IngestType { get; set; }
-        [JsonPropertyName("summary")]
-        public string? Summary { get; set; }
     }
 
     /// <summary>

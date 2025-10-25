@@ -12,32 +12,41 @@ public sealed class PdfToMarkdownOptions
     public double LineYTolerance { get; set; } = 2.0;
     public double RepeatLineRemovalThreshold { get; set; } = 0.6;
 
-    // Hard noise (always drop)
+    // Hard noise (always drop) 
     public List<string> NoiseStartsWith { get; } = new()
-    {
-        "This document contains proprietary information",
-        "Unauthorized use, reproduction, or distribution is strictly",
-        "Uncontrolled if printed",
-        "Before using this document, the reader is responsible",
-        "Copyright",
-        // Additional corporate banners and CUI/Privacy warnings commonly present in SOP headers
-        // These tokens help remove sensitive handling notices that should not appear in downstream RAG
-        "CUI",
-        "Controlled Unclassified",
-        "Privacy Act",
-        "Sensitive but unclassified",
-    };
+{
+    "This document contains proprietary information",
+    "Unauthorized use",                    // catches the start of the banner, even if broken across lines
+    "Uncontrolled if printed",
+    "Before using this document, the reader is responsible",
+    "Copyright",
+    "All rights reserved",
+    "use, reproduction, or distribution",  // catches the second half of the banner if it starts a line
+    // Additional corporate banners and CUI/Privacy warnings commonly present in SOP headers
+    "CUI",
+    "Controlled Unclassified",
+    "Privacy Act",
+    "Sensitive but unclassified"
+};
 
     public List<Regex> NoisePatterns { get; } = new()
-    {
-        new Regex(@"(?i)^\s*Page\s*:\s*\d+\s*of\s*\d+\s*$"),
-        new Regex(@"(?i)^CLG\-[A-Z\-]+\d+(\s*Page\s*\d+)?$"),
-        new Regex(@"(?i)\b(all rights reserved|uncontrolled if printed)\b"),
-        // Lines like "Revision: G" that repeat on every page outside the header should be dropped
-        new Regex(@"(?i)^\s*Revision\s*:\s*[A-Za-z0-9]+\s*$"),
-        // Generic CUI/Privacy labels anywhere in the line
-        new Regex(@"(?i)\b(CUI|Controlled\s+Unclassified|Privacy\s+Act|Sensitive\s+but\s+unclassified)\b"),
-    };
+{
+    // Existing patterns for pages, CLG codes, revisions, and banners
+    new Regex(@"(?i)^\s*Page\s*:\s*\d+\s*of\s*\d+\s*$"),
+    new Regex(@"(?i)^CLG\-[A-Z\-]+\d+(\s*Page\s*\d+)?$"),
+    new Regex(@"(?i)^\s*Revision\s*:\s*[A-Za-z0-9]+\s*$"),
+    new Regex(@"(?i)\b(CUI|Controlled\s+Unclassified|Privacy\s+Act|Sensitive\s+but\s+unclassified)\b"),
+    new Regex(@"(?i)\bproprietary information\b"),
+    new Regex(@"(?i)\bUnauthorized\s+use\b"),
+    new Regex(@"(?i)\buse\s*,\s*reproduction\s*,\s*or\s*distribution\b"),
+    new Regex(@"(?i)\breproduction\s*,\s*or\s*distribution\b"),
+    new Regex(@"(?i)\buncontrolled if printed\b"),
+    new Regex(@"(?i)\bAll rights reserved\b"),
+
+    // NEW: drop any isolated “use, or” fragment
+    new Regex(@"(?i)^\s*use\s*,?\s*or\s*$")
+};
+
 
     // Numbered headings like "1.0 Purpose"
     public Regex NumberedHeading { get; set; } =
@@ -106,34 +115,27 @@ public sealed class PdfToMarkdownConverter
     // ---------- Core ----------
     private string ConvertToMarkdownCore(PdfDocument pdf, string logicalName)
     {
+        // Build per‑page line structures
         var allPages = new List<PageLines>();
         foreach (var pg in pdf.GetPages())
             allPages.Add(BuildLines(pg, _opt.LineYTolerance));
 
+        // Identify repeating header/footer lines to drop
         var repeatSet = DetectRepeatingLines(allPages, _opt.RepeatLineRemovalThreshold);
 
-        // Header (only from the top block of the first page)
+        // Parse the header and title from the first page
         var (header, headerLineTexts, title) = ParseHeaderAndTitle(allPages.FirstOrDefault());
 
-        // Build MD
+        // Start the Markdown with the document title (no metadata table)
         var md = new StringBuilder();
         var h1 = title ?? header.GetValueOrDefault("doc") ?? logicalName;
         md.AppendLine("# " + EscapeMd(h1));
         md.AppendLine();
-        md.AppendLine("| Field | Value |");
-        md.AppendLine("|---|---|");
-        WriteMetaRow(md, "Document No.", header.GetValueOrDefault("doc"));
-        WriteMetaRow(md, "Effective Date", header.GetValueOrDefault("eff"));
-        WriteMetaRow(md, "Revision", header.GetValueOrDefault("rev"));
-        WriteMetaRow(md, "Accountable Organization", header.GetValueOrDefault("org"));
-        WriteMetaRow(md, "Management Approval", header.GetValueOrDefault("appr"));
-        WriteMetaRow(md, "Source", header.GetValueOrDefault("src"));
-        md.AppendLine();
 
         bool inProcessSection = false;
-        // Buffer used to accumulate plain text lines into paragraphs
         var paraBuf = new StringBuilder();
-        // Local helper to flush any pending paragraph to the markdown builder
+
+        // Helper to emit any accumulated paragraph text
         void FlushParagraph()
         {
             if (paraBuf.Length > 0)
@@ -143,20 +145,19 @@ public sealed class PdfToMarkdownConverter
                 paraBuf.Clear();
             }
         }
-        // Decide whether to merge the current line with the next one. We merge when
-        // the current line does not end a sentence (no final punctuation) and the next
-        // line begins with a lower‐case letter and is not obviously a list item or new section.
+
+        // Decide whether to merge the current line with the next one
         bool ShouldMerge(string curr, string? next)
         {
             if (string.IsNullOrWhiteSpace(curr) || string.IsNullOrWhiteSpace(next)) return false;
             string c = curr.TrimEnd();
             string n = next.TrimStart();
             // Break paragraphs on headings or list/outline indicators
-            // If the next line begins with a number (e.g. "6.1"), a letter + '.' or ')', a bullet character or a capitalized word,
-            // treat it as a new list item or section.
-            if (Regex.IsMatch(n, @"^(\d+(?:\.\d+)*\b|[A-Za-z]\.|[A-Za-z]\)|[-•])")) return false;
+            // If the next line begins with a number (e.g. "6.1"), a letter + '.' or ')',
+            // a bullet character or a capitalized word, treat it as a new list item or section.
+            if (Regex.IsMatch(n, @"^(\d+(?:\.\d+)*\b|[A-Za-z]\.|[A-Za-z]\)|[-\u2022])")) return false;
             // If current line ends with sentence punctuation, do not merge
-            if (Regex.IsMatch(c, @"[\.\!\?:;]$")) return false;
+            if (Regex.IsMatch(c, @"[\.!\?:;]$")) return false;
             // Merge only if the next line starts with a lower case letter
             char first = n[0];
             if (char.IsLower(first)) return true;
@@ -165,15 +166,13 @@ public sealed class PdfToMarkdownConverter
 
         for (int pi = 0; pi < allPages.Count; pi++)
         {
-            var page = allPages[pi];
-
-            // Filter noise & banners; also drop header lines from page 1
             var body = allPages[pi].Lines
-              .Where(l => !repeatSet.Contains(l.Text.Trim()))
-              .Where(l => !IsNoise(l.Text))
-              .Where(l => !(pi == 0 && headerLineTexts.Contains(l.Text.Trim())))
-              .ToList();
+                .Where(l => !repeatSet.Contains(l.Text.Trim()))
+                .Where(l => !IsNoise(l.Text))
+                .Where(l => !(pi == 0 && headerLineTexts.Contains(l.Text.Trim())))
+                .ToList();
 
+            // Remove duplicate title on the first page
             if (pi == 0 && title is not null)
                 body.RemoveAll(l => string.Equals(l.Text.Trim(), title, StringComparison.OrdinalIgnoreCase));
 
@@ -187,7 +186,6 @@ public sealed class PdfToMarkdownConverter
                 var mh = _opt.NumberedHeading.Match(text);
                 if (mh.Success)
                 {
-                    // flush any pending paragraph before writing a heading
                     FlushParagraph();
                     var num = mh.Groups["num"].Value;
                     var ttl = mh.Groups["title"].Value.Trim();
@@ -200,7 +198,7 @@ public sealed class PdfToMarkdownConverter
                     continue;
                 }
 
-                // 2) Process table header? Try to detect and extract as Markdown table within the Process section.
+                // 2) Process table header?  Try to detect and extract as Markdown table within the Process section.
                 if (inProcessSection && LooksLikeProcessTableHeader(raw))
                 {
                     var anchors = ComputeColumnAnchors(body, i, _opt.TableLookaheadLines);
@@ -218,7 +216,6 @@ public sealed class PdfToMarkdownConverter
                     }
                     if (looksTabular)
                     {
-                        // Flush any accumulated paragraph before outputting a table
                         FlushParagraph();
                         var (rows, consumed) = ExtractTableWithAnchors(body, i, anchors);
                         if (rows.Count >= 2)
@@ -240,7 +237,7 @@ public sealed class PdfToMarkdownConverter
                 }
                 else
                 {
-                    // Add a space before concatenating to avoid run-on words
+                    // Add a space before concatenating to avoid run‑on words
                     paraBuf.Append(" " + escaped);
                 }
                 // Decide if we should merge with the next line or flush now
@@ -252,12 +249,15 @@ public sealed class PdfToMarkdownConverter
                 }
                 i++;
             }
-            // End of page: flush any residual paragraph
-            FlushParagraph();
+            // NOTE: Do not flush at page boundaries here; paragraphs can continue onto the next page.
         }
+
+        // Flush any residual paragraph after the last page
+        FlushParagraph();
 
         return md.ToString().Trim() + Environment.NewLine;
     }
+
 
     // ---------- Layout ----------
     private sealed class WordBox
